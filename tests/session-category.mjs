@@ -15,6 +15,11 @@ import {
   SUBCATEGORY_LIMIT,
   buildCategoryPrompt,
   buildCategoryTree,
+  buildRenamePrompt,
+  collectNames,
+  mergeBatchTrees,
+  parseRenameMap,
+  splitIntoBatches,
   fallbackTree,
   filterTree,
   looksAutomated,
@@ -234,8 +239,80 @@ test('数量常量合理', () => {
   assert.equal(SUBCATEGORY_LIMIT, 4)
 })
 
+test('分批：按大小切分', () => {
+  const items = prepareSessions(Array.from({ length: 25 }, (_, i) => ({
+    sessionId: 's' + i, title: 't' + i, firstPrompt: '', turns: 1,
+  })))
+  const batches = splitIntoBatches(items, 10)
+  assert.equal(batches.length, 3)
+  assert.equal(batches[0].length, 10)
+  assert.equal(batches[2].length, 5)
+})
+
+test('分批：空列表与非法大小', () => {
+  assert.deepEqual(splitIntoBatches([], 10), [])
+  assert.equal(splitIntoBatches([{ id: 'a' }], 0).length, 1, '非法大小退回 100')
+})
+
+test('合并多批树：同名大类合并', () => {
+  const t1 = [{ name: '插件开发', count: 2, subcategories: [{ name: '地图', sessions: [{ sessionId: 'a' }, { sessionId: 'b' }] }] }]
+  const t2 = [{ name: '插件开发', count: 1, subcategories: [{ name: '地图', sessions: [{ sessionId: 'c' }] }] }]
+  const merged = mergeBatchTrees([t1, t2], null)
+  assert.equal(merged.length, 1, '同名大类应合并为一个')
+  assert.equal(merged[0].count, 3)
+  assert.equal(merged[0].subcategories[0].sessions.length, 3, '同名子类应合并会话')
+})
+
+test('合并多批树：用映射表归一近义名', () => {
+  const t1 = [{ name: '插件开发', count: 1, subcategories: [{ name: 'a', sessions: [{ sessionId: 'x' }] }] }]
+  const t2 = [{ name: '插件研发', count: 1, subcategories: [{ name: 'b', sessions: [{ sessionId: 'y' }] }] }]
+  const map = new Map([['插件研发', '插件开发']])
+  const merged = mergeBatchTrees([t1, t2], map)
+  assert.equal(merged.length, 1, '近义名应归一为一个')
+  assert.equal(merged[0].name, '插件开发')
+  assert.equal(merged[0].count, 2)
+})
+
+test('收集名字去重', () => {
+  const t1 = [{ name: 'A', subcategories: [{ name: 'x' }] }]
+  const t2 = [{ name: 'A', subcategories: [{ name: 'y' }] }]
+  const names = collectNames([t1, t2])
+  assert.deepEqual(names.categories, ['A'])
+  assert.equal(names.subs.length, 2)
+})
+
+test('名称归一提示词要求等长输出', () => {
+  const p = buildRenamePrompt(['插件开发', '插件研发'], 'category')
+  assert.ok(p.system.includes('2'))
+  assert.ok(p.user.includes('插件开发'))
+})
+
+test('解析名称映射', () => {
+  const map = parseRenameMap('["插件开发","插件开发"]', 2, ['插件开发', '插件研发'])
+  assert.equal(map.get('插件研发'), '插件开发')
+})
+
+test('名称映射长度不符返回 null', () => {
+  assert.equal(parseRenameMap('["a"]', 2, ['a', 'b']), null)
+})
+
+// ── origin 字段优先 ────────────────────────────────────────────────
+test('origin=subagent 直接判定为自动会话', () => {
+  assert.equal(looksAutomated({ title: '随便什么标题', firstPrompt: 'hi', origin: 'subagent' }), true)
+})
+
+test('delegationDepth>0 也判定为自动会话', () => {
+  assert.equal(looksAutomated({ title: 't', firstPrompt: 'x', delegationDepth: 2 }), true)
+})
+
+test('origin 缺失时退回正则（实测当前 DSH 不填这个字段）', () => {
+  assert.equal(looksAutomated({ title: '[dsh-mnemon:delegated review]', firstPrompt: '', origin: undefined }), true)
+})
+
+
 console.log(`\n${passed} passed, ${failures.length} failed`)
 if (failures.length > 0) {
   for (const f of failures) console.error(`\n${f.name}\n${f.error.stack}`)
   process.exit(1)
 }
+// ── 分批与名称归一 ──────────────────────────────────────────────────

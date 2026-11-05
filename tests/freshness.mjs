@@ -58,3 +58,25 @@ test('没有新轮次时不产生未归类阶段', () => {
   assert.equal(r.lanes.length, 1)
   assert.equal(r.stages.some(s => s.isUnclassified), false)
 })
+
+test('采纳后新轮次被归类：unclassifiedTurns 清空', () => {
+  // 这是"点了归类但看着没变"的核心契约：
+  // 只要采纳的分层覆盖了全部轮次，就不该再有未归类泳道。
+  const turns = [{ turn: 1 }, { turn: 2 }, { turn: 3 }, { turn: 4 }]
+  const saved = [
+    { laneId: 's:L1', title: 'A', taskName: 'A', stageName: '阶段A', workflowName: 'WA', turns: [1, 2] },
+    { laneId: 's:L2', title: 'B', taskName: 'B', stageName: '阶段B', workflowName: 'WB', turns: [3, 4] },
+  ]
+  const r = reconcileClassification(turns, saved, 's')
+  assert.deepEqual(r.unclassifiedTurns, [], '全覆盖时不该有未归类')
+  assert.equal(r.lanes.some(l => l.origin === 'unassigned'), false)
+})
+
+test('部分覆盖时只把漏掉的轮次放进未归类', () => {
+  const turns = [{ turn: 1 }, { turn: 2 }, { turn: 3 }, { turn: 4 }, { turn: 5 }]
+  const saved = [
+    { laneId: 's:L1', title: 'A', taskName: 'A', stageName: '阶段A', workflowName: 'WA', turns: [1, 2, 3] },
+  ]
+  const r = reconcileClassification(turns, saved, 's')
+  assert.deepEqual(r.unclassifiedTurns, [4, 5])
+})

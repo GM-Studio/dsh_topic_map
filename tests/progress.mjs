@@ -35,7 +35,7 @@ test('新运行停在第 1 步', () => {
 })
 
 test('三个步骤都有 id 与中文名', () => {
-  assert.equal(ANALYSIS_STEPS.length, 3)
+  assert.equal(ANALYSIS_STEPS.length, 4)
   for (const s of ANALYSIS_STEPS) {
     assert.ok(s.id && s.label && s.detail)
   }
@@ -45,8 +45,9 @@ test('三个步骤都有 id 与中文名', () => {
 test('推进到第 2 步时第 1 步标记完成', () => {
   let r = startRun('s', 1000)
   r = advanceRun(r, 'workflow', 2000)
-  assert.equal(r.step, 1)
+  assert.equal(r.step, ANALYSIS_STEPS.findIndex(x => x.id === 'workflow'))
   assert.equal(r.steps.segment, 'done')
+  assert.equal(r.steps.merge, 'done', '中间步应被标完成')
   assert.equal(r.steps.workflow, 'active')
 })
 
@@ -54,7 +55,7 @@ test('推进不修改入参（不可变）', () => {
   const before = startRun('s', 1000)
   const after = advanceRun(before, 'workflow', 2000)
   assert.equal(before.step, 0, '原对象不应被改')
-  assert.equal(after.step, 1)
+  assert.equal(after.step, 2)
 })
 
 test('未知步骤 id 被忽略', () => {
@@ -76,7 +77,7 @@ test('正常结束把所有步骤标完成', () => {
   r = advanceRun(r, 'stage', 2000)
   r = finishRun(r, RUN_STATUS.done, null, 3000)
   assert.equal(r.status, 'done')
-  assert.equal(r.step, 3)
+  assert.equal(r.step, ANALYSIS_STEPS.length)
   assert.equal(r.label, '完成')
   for (const id of ['segment', 'workflow', 'stage']) {
     assert.equal(r.steps[id], 'done', `${id} 应完成`)
@@ -111,11 +112,12 @@ test('视图给出步骤列表与耗时', () => {
   r = advanceRun(r, 'workflow', 5000)
   const v = runView(r, 6000)
   assert.equal(v.active, true)
-  assert.equal(v.currentStep, 1)
-  assert.equal(v.totalSteps, 3)
+  assert.equal(v.currentStep, ANALYSIS_STEPS.findIndex(x => x.id === 'workflow'))
+  assert.equal(v.totalSteps, ANALYSIS_STEPS.length)
   assert.equal(v.elapsedMs, 5000)
   assert.equal(v.steps[0].state, 'done')
-  assert.equal(v.steps[1].state, 'active')
+  var wfAt = ANALYSIS_STEPS.findIndex(x => x.id === 'workflow')
+  assert.equal(v.steps[wfAt].state, 'active')
 })
 
 test('空记录给 idle 视图而不是崩溃', () => {
@@ -171,7 +173,7 @@ test('set 能更新记录', () => {
   let r = store.start('a', 1000)
   r = advanceRun(r, 'workflow', 2000)
   store.set('a', r)
-  assert.equal(store.get('a').step, 1)
+  assert.equal(store.get('a').step, 2)
 })
 
 console.log(`\n${passed} passed, ${failures.length} failed`)

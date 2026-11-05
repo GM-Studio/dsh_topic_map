@@ -175,6 +175,49 @@ test('a single topic produces no forks', () => {
   assert.equal(g.columnCount, 1)
 })
 
+// ── 合并与主支线 ────────────────────────────────────────────────────
+test('合并产生 merge 边（方向：被吸收 → 保留）', () => {
+  const lanes = [
+    { laneId: 'A', turns: [0, 1, 2], parentLaneId: null, title: '甲', mergedFrom: ['B'], mergedAt: [2] },
+    { laneId: 'B', turns: [2], parentLaneId: 'A', title: '乙' },
+  ]
+  const g = buildGraph(turnsOf(3), lanes)
+  const merges = g.edges.filter(e => e.kind === 'merge')
+  assert.equal(merges.length, 1)
+  assert.equal(merges[0].absorbedLaneId, 'B')
+  assert.equal(merges[0].laneId, 'A')
+  assert.equal(merges[0].fromCol, 1, '从被吸收那条的行出发')
+  assert.equal(merges[0].toCol, 0, '连到保留那条的行')
+})
+
+test('没有合并信息时不产生 merge 边', () => {
+  const g = buildGraph(turnsOf(4), [
+    { laneId: 'A', turns: [0, 1], parentLaneId: null, title: 'A' },
+    { laneId: 'B', turns: [2, 3], parentLaneId: 'A', title: 'B' },
+  ])
+  assert.equal(g.edges.filter(e => e.kind === 'merge').length, 0)
+})
+
+test('第一个话题被标记为主线，其余为支线', () => {
+  const g = buildGraph(turnsOf(4), [
+    { laneId: 'A', turns: [0, 1], parentLaneId: null, title: 'A' },
+    { laneId: 'B', turns: [2, 3], parentLaneId: 'A', title: 'B' },
+  ])
+  assert.equal(g.trunkLaneId, 'A')
+  assert.equal(g.labels.find(l => l.laneId === 'A').role, 'trunk')
+  assert.equal(g.labels.find(l => l.laneId === 'B').role, 'branch')
+})
+
+test('合并后的名字随标签下发', () => {
+  const g = buildGraph(turnsOf(3), [
+    { laneId: 'A', turns: [0, 1, 2], parentLaneId: null, title: '甲 / 乙', mergedFrom: ['B'] },
+    { laneId: 'B', turns: [], parentLaneId: null, title: '乙' },
+  ])
+  const label = g.labels.find(l => l.laneId === 'A')
+  assert.equal(label.text, '甲 / 乙')
+  assert.deepEqual(label.mergedFrom, ['B'])
+})
+
 test('nodes are in reading order', () => {
   const lanes = [
     { laneId: 'A', turns: [0, 2], parentLaneId: null, title: 'A' },

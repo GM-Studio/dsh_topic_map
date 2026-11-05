@@ -1,0 +1,9 @@
+# Bundle patch layer: one Host row.
+#
+# The Host half registers an HTTP endpoint under /api/topic-map/* so the
+# browser half (loaded through the `dsh.client` declaration in package.json)
+# has something to call. `webServer` is reached through an optional inject so a
+# composition without it leaves the plugin inert instead of failing to boot.
+- insert:
+    - id: topic-map
+      name: dsh-topic-map

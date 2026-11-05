@@ -1,0 +1,10 @@
+# 统一换行符：仓库内统一用 LF，避免 Windows 检出后产生满屏 diff
+* text=auto eol=lf
+
+# 需要保留原始字节的类型
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

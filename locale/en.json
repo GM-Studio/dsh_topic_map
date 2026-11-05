@@ -1,0 +1,7 @@
+{
+  "title": "Topic Map",
+  "noSession": "Open a session first",
+  "loading": "Reading session…",
+  "empty": "No turns in this session yet",
+  "unavailable": "Topic Map is unavailable"
+}

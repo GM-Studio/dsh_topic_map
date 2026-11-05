@@ -40,6 +40,8 @@ const FOLD_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/tree
 const FOLD_END = '    // ══ 树折叠生成段结束 ══'
 const DELIV_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/deliverables.js'
 const DELIV_END = '    // ══ 交付物生成段结束 ══'
+const GMODE_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/graph-mode.js'
+const GMODE_END = '    // ══ 图着色模式生成段结束 ══'
 const REPORT_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/report.js'
 const REPORT_END = '    // ══ 报告生成段结束 ══'
 
@@ -154,6 +156,23 @@ const reportWrapped = [
   REPORT_END,
 ].join('\n')
 
+
+const gmSrc = strip(readFileSync(join(root, 'lib', 'graph-mode.js'), 'utf8'))
+const gmWrapped = [
+  GMODE_START,
+  '    // 图着色模式，纯函数，独立测试过（tests/graph-mode.mjs）。',
+  '    var GMODE = (function () {',
+  indent(gmSrc),
+  '      return {',
+  '        GRAPH_MODES: GRAPH_MODES, GRAPH_MODE_KEY: GRAPH_MODE_KEY, STATUS_HUE: STATUS_HUE,',
+  '        statusColor: statusColor, laneColor: laneColor, stateIndexMap: stateIndexMap,',
+  '        nextGraphMode: nextGraphMode, loadGraphMode: loadGraphMode,',
+  '        saveGraphMode: saveGraphMode, graphModeLabel: graphModeLabel,',
+  '      }',
+  '    })()',
+  GMODE_END,
+].join('\n')
+
 const clientPath = join(root, 'lib', 'client.js')
 let client = readFileSync(clientPath, 'utf8')
 
@@ -187,6 +206,7 @@ console.log('ui-state:', splice(UI_START, UI_END, uiWrapped, PM_END))
 console.log('tree-fold:', splice(FOLD_START, FOLD_END, foldWrapped, UI_END))
 console.log('deliverables:', splice(DELIV_START, DELIV_END, delivWrapped, FOLD_END))
 console.log('report:', splice(REPORT_START, REPORT_END, reportWrapped, DELIV_END))
+console.log('graph-mode:', splice(GMODE_START, GMODE_END, gmWrapped, REPORT_END))
 
 writeFileSync(clientPath, client)
 console.log('已写入 lib/client.js')

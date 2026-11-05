@@ -109,9 +109,28 @@ test('详情带跳转按钮', () => {
 
 // ── 5. 聚焦时的淡化 ─────────────────────────────────────────────────
 test('聚焦时其余泳道的节点、标签、连线都淡化', () => {
-  // 三处 dim 判断都在
-  const dimCount = (src.match(/highlightLane !== null/g) || []).length
+  // 三处 dim 判断都基于统一的 focusLaneId（selectedLane 优先于 highlightLane）
+  const dimCount = (src.match(/focusLaneId !== null/g) || []).length
   assert.ok(dimCount >= 3, `节点/标签/连线都应参与淡化，实际 ${dimCount} 处`)
+})
+
+test('点节点会联动泳道（这是之前的 bug：只动了左树）', () => {
+  // selectTurn 里必须设置泳道聚焦，否则点节点后整条线毫无反应
+  const body = src.slice(src.indexOf('function selectTurn('))
+  const head = body.slice(0, body.indexOf('\n      }'))
+  assert.ok(head.includes('setHighlightLane'), '点节点应设置泳道高亮')
+  assert.ok(head.includes('setSelectedLane'), '点节点应记录选中泳道')
+})
+
+test('聚焦泳道的连线加粗、节点放大', () => {
+  assert.ok(src.includes('edgeHot'), '连线应有聚焦加粗分支')
+  assert.ok(src.includes('isNeighbor'), '应有前后邻接高亮')
+  // 节点半径随选中/邻接/聚焦分档
+  assert.ok(src.includes('rad * 1.5') && src.includes('rad * 1.22'), '节点应按选中/邻接放大')
+})
+
+test('选中泳道优先于左栏高亮', () => {
+  assert.ok(src.includes('var focusLaneId = selectedLane !== null'), '应统一为 focusLaneId 且 selectedLane 优先')
 })
 
 test('连线透传 laneId，淡化才能按泳道判断', () => {

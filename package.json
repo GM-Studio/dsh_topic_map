@@ -1,7 +1,7 @@
 {
   "name": "dsh-topic-map",
-  "version": "0.0.1",
-  "description": "话题地图：把会话的 turn 摆成横置时间轴泳道图，同一话题一条泳道，话题切换向下分叉",
+  "version": "0.1.0",
+  "description": "话题地图：把会话变成话题关系图，像 git graph 一样看出分支、合并、主线与支线；含三层分级、状态推导与跳转",
   "icon": "icon.svg",
   "type": "module",
   "engines": {

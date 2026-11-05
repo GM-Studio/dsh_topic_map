@@ -12,6 +12,7 @@ import {
   findForks,
   findMerges,
   findRelated,
+  pickTopRelated,
   findSharedTurns,
   findTrunk,
 } from '../lib/topic-graph.js'
@@ -161,6 +162,24 @@ test('低于阈值的忽略', () => {
   assert.equal(findRelated(lanes, () => 0.1, 0.28).length, 0)
 })
 
+test('阈值 0 时保留全部候选（供调用方自己按相对阈值筛）', () => {
+  // 这是相对阈值方案的基础：先全收，再由调用方挑"最像的那几条"。
+  // 实测中文长标题的 Jaccard 普遍偏低（最高仅 0.139），
+  // 用绝对阈值会在不同数据上时松时紧。
+  const lanes = [lane('A', [1]), lane('B', [2]), lane('C', [3])]
+  const rel = findRelated(lanes, () => 0.05, 0)
+  assert.equal(rel.length, 3, '阈值 0 应保留全部 3 对')
+})
+
+test('阈值 0 时结果仍按分数降序（调用方才能取最高分定基准）', () => {
+  const lanes = [lane('A', [1]), lane('B', [2]), lane('C', [3])]
+  const scores = { 'A|B': 0.05, 'A|C': 0.4, 'B|C': 0.2 }
+  const sim = (a, b) => scores[a.laneId + '|' + b.laneId] ?? scores[b.laneId + '|' + a.laneId] ?? 0
+  const rel = findRelated(lanes, sim, 0)
+  assert.equal(rel[0].score, 0.4, '最高分必须排第一')
+  assert.equal(rel[rel.length - 1].score, 0.05)
+})
+
 test('按分数降序（界面可只取前几条）', () => {
   const lanes = [lane('A', [1]), lane('B', [2]), lane('C', [3])]
   const scores = { 'A|B': 0.4, 'A|C': 0.9, 'B|C': 0.3 }
@@ -207,6 +226,57 @@ test('真实形态：主线分出支线，支线回来后合并', () => {
   const merges = findMerges(lanes)
   assert.equal(merges.length, 1, 'B 与 A 在 6 之后重合，应合并')
   assert.equal(merges[0].atTurn, 6)
+})
+
+// ── 相对阈值 ────────────────────────────────────────────────────────
+test('相对阈值：取最高分的一定比例', () => {
+  const pairs = [
+    { a: 'A', b: 'B', score: 0.40 },
+    { a: 'A', b: 'C', score: 0.20 },
+    { a: 'B', b: 'C', score: 0.05 },
+  ]
+  // 最高 0.40，45% = 0.18 -> 保留 0.40 与 0.20
+  const got = pickTopRelated(pairs, { floor: 0.08, ratio: 0.45 })
+  assert.equal(got.length, 2)
+  assert.equal(got[1].score, 0.20)
+})
+
+test('绝对下限挡住"巧合共字"', () => {
+  // 最高分都很低时（比如 0.05），下限 0.08 应把它们全部挡住
+  const pairs = [{ a: 'A', b: 'B', score: 0.05 }]
+  assert.equal(pickTopRelated(pairs, { floor: 0.08, ratio: 0.45 }).length, 0)
+})
+
+test('这正是实测场景：最高仅 0.139 也能选出结果', () => {
+  // 若用绝对阈值 0.3，这个会话一条都选不出来
+  const pairs = [
+    { a: 'A', b: 'B', score: 0.139 },
+    { a: 'A', b: 'C', score: 0.115 },
+    { a: 'B', b: 'C', score: 0.086 },
+    { a: 'C', b: 'D', score: 0.02 },
+  ]
+  const got = pickTopRelated(pairs, { floor: 0.08, ratio: 0.45 })
+  // 0.139*0.45 = 0.0626 -> 下限 0.08 生效 -> 保留 >=0.08 的三条
+  assert.equal(got.length, 3)
+  assert.equal(got[0].score, 0.139)
+})
+
+test('数量有上限', () => {
+  const pairs = Array.from({ length: 30 }, (_, i) => ({ a: 'A', b: 'B' + i, score: 0.5 - i * 0.001 }))
+  assert.equal(pickTopRelated(pairs, { limit: 5 }).length, 5)
+})
+
+test('空输入与全零分数不崩', () => {
+  assert.deepEqual(pickTopRelated([]), [])
+  assert.deepEqual(pickTopRelated(null), [])
+  assert.deepEqual(pickTopRelated([{ a: 'A', b: 'B', score: 0 }]), [])
+})
+
+test('非法分数被过滤', () => {
+  const pairs = [{ a: 'A', b: 'B', score: 0.5 }, { a: 'A', b: 'C', score: NaN }]
+  const got = pickTopRelated(pairs)
+  assert.equal(got.length, 1)
+  assert.equal(got[0].b, 'B')
 })
 
 console.log(`\n${passed} passed, ${failures.length} failed`)

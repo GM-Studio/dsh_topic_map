@@ -42,6 +42,8 @@ const DELIV_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/del
 const DELIV_END = '    // ══ 交付物生成段结束 ══'
 const SCAT_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/session-category.js'
 const SCAT_END = '    // ══ 会话归类生成段结束 ══'
+const MODELOUT_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/model-output.js'
+const MODELOUT_END = '    // ══ 模型输出抽取生成段结束 ══'
 const GMODE_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/graph-mode.js'
 const GMODE_END = '    // ══ 图着色模式生成段结束 ══'
 const REPORT_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/report.js'
@@ -176,14 +178,23 @@ const gmWrapped = [
 ].join('\n')
 
 const scatSrc = strip(readFileSync(join(root, 'lib', 'session-category.js'), 'utf8'))
+// session-category 依赖 model-output 的抽取函数。client.js 里没有 import，
+// 所以必须把 model-output 的源码**放进同一个 IIFE**，否则运行时会
+// "extractJsonArrayOfLength is not defined" —— 而那正是白屏的来源。
+const modelOutSrc = strip(readFileSync(join(root, 'lib', 'model-output.js'), 'utf8'))
 const scatWrapped = [
   SCAT_START,
-  '    // 会话归类，纯函数，独立测试过（tests/session-category.mjs）。',
+  '    // 会话归类 + 模型输出抽取，纯函数，独立测试过。',
+  '    // model-output 必须嵌在同一个作用域里：SCAT 要用它的抽取函数。',
   '    var SCAT = (function () {',
+  indent(modelOutSrc),
+  '',
   indent(scatSrc),
   '      return {',
   '        CATEGORY_RANGE: CATEGORY_RANGE, looksAutomated: looksAutomated,',
   '        filterTree: filterTree,',
+  '        extractJsonArray: extractJsonArray,',
+  '        extractJsonArrayOfLength: extractJsonArrayOfLength,',
   '      }',
   '    })()',
   SCAT_END,

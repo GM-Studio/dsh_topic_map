@@ -93,6 +93,46 @@ test('verify-bundle 脚本存在且通过', () => {
   assert.ok(out.includes('导出都完整'), `verify-bundle 未通过：${out}`)
 })
 
+// ── 嵌入模块的真实可执行性（防白屏）────────────────────────────────
+//
+// 符号存在 ≠ 能跑。SCAT 依赖 model-output 的抽取函数，而 client.js 没有
+// import——构建脚本会把 import 删掉，所以必须把 model-output 的源码嵌进
+// 同一个 IIFE。少嵌一次就是运行时 "xxx is not defined" + 面板白屏，
+// 而所有单元测试仍然是绿的（它们测 lib/ 源码）。
+//
+// 所以这里不只查符号，而是**真的执行**嵌入段并调用它的函数。
+
+/** 抽出嵌入段并真实执行，返回它的导出对象。 */
+function evalEmbedded(name) {
+  const block = moduleBlock(name)
+  assert.ok(block !== null, `client.js 里找不到 ${name} 段`)
+  const module = { exports: {} }
+  // eslint-disable-next-line no-new-func
+  new Function('module', 'exports', `${block}\n;module.exports = ${name};`)(module, module.exports)
+  return module.exports
+}
+
+test('SCAT 嵌入后能真实执行（依赖的抽取函数在同作用域内）', () => {
+  const SCAT = evalEmbedded('SCAT')
+  assert.equal(typeof SCAT.extractJsonArrayOfLength, 'function',
+    'SCAT 必须能访问 model-output 的抽取函数，否则运行时白屏')
+  assert.deepEqual(
+    SCAT.extractJsonArrayOfLength('我先分 [草稿]，答案：["a","b"]', 2),
+    ['a', 'b'],
+    '嵌入后的抽取逻辑应真实可用',
+  )
+})
+
+test('SCAT 的会话识别能真实执行', () => {
+  const SCAT = evalEmbedded('SCAT')
+  assert.equal(SCAT.looksAutomated({ title: '[dsh-mnemon:delegated review]', firstPrompt: '' }), true)
+})
+
+test('GMODE 嵌入后能真实执行', () => {
+  const GMODE = evalEmbedded('GMODE')
+  assert.ok(GMODE.statusColor('done', 0, 'light').includes('hsl('))
+})
+
 console.log(`\n${passed} passed, ${failures.length} failed`)
 if (failures.length > 0) {
   for (const f of failures) console.error(`\n${f.name}\n${f.error.stack}`)

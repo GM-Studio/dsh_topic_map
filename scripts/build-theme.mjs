@@ -40,6 +40,8 @@ const FOLD_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/tree
 const FOLD_END = '    // ══ 树折叠生成段结束 ══'
 const DELIV_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/deliverables.js'
 const DELIV_END = '    // ══ 交付物生成段结束 ══'
+const SCAT_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/session-category.js'
+const SCAT_END = '    // ══ 会话归类生成段结束 ══'
 const GMODE_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/graph-mode.js'
 const GMODE_END = '    // ══ 图着色模式生成段结束 ══'
 const REPORT_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/report.js'
@@ -173,6 +175,20 @@ const gmWrapped = [
   GMODE_END,
 ].join('\n')
 
+const scatSrc = strip(readFileSync(join(root, 'lib', 'session-category.js'), 'utf8'))
+const scatWrapped = [
+  SCAT_START,
+  '    // 会话归类，纯函数，独立测试过（tests/session-category.mjs）。',
+  '    var SCAT = (function () {',
+  indent(scatSrc),
+  '      return {',
+  '        CATEGORY_RANGE: CATEGORY_RANGE, looksAutomated: looksAutomated,',
+  '        filterTree: filterTree,',
+  '      }',
+  '    })()',
+  SCAT_END,
+].join('\n')
+
 const clientPath = join(root, 'lib', 'client.js')
 let client = readFileSync(clientPath, 'utf8')
 
@@ -207,6 +223,7 @@ console.log('tree-fold:', splice(FOLD_START, FOLD_END, foldWrapped, UI_END))
 console.log('deliverables:', splice(DELIV_START, DELIV_END, delivWrapped, FOLD_END))
 console.log('report:', splice(REPORT_START, REPORT_END, reportWrapped, DELIV_END))
 console.log('graph-mode:', splice(GMODE_START, GMODE_END, gmWrapped, REPORT_END))
+console.log('session-category:', splice(SCAT_START, SCAT_END, scatWrapped, GMODE_END))
 
 writeFileSync(clientPath, client)
 console.log('已写入 lib/client.js')

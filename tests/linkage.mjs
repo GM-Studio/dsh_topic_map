@@ -88,8 +88,13 @@ test('中间列表点条目会联动左栏', () => {
 })
 
 // ── 4. 数字一致：左栏轮数来自实时刷新 ──────────────────────────────
-test('前端请求归类时带上 activeSessionId', () => {
-  assert.ok(src.includes('activeSessionId: activeSessionId'), '应把当前会话传给后端')
+test('前端始终请求全量刷新轮数（增量判断后只要 ~85ms）', () => {
+  // 早先只刷当前会话，导致左栏其它会话的数字一直是旧值。
+  // Host 侧改成按 revision 增量判断后，全量刷新从 3877ms 降到 85ms，
+  // 所以前端不再需要"只刷一个"的优化。
+  assert.ok(src.includes('activeSessionId: null'), '应请求全量刷新')
+  assert.equal(src.includes('activeSessionId: activeSessionId === undefined'), false,
+    '不应再按当前会话收窄刷新范围')
 })
 
 const host = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
@@ -99,11 +104,20 @@ test('后端缓存命中时刷新轮数（否则左栏数字会过期）', () =>
   assert.ok(host.includes('refreshTurnCounts(ctx, cached.tree'), '缓存命中应调用它')
 })
 
-test('只刷新当前会话，避免变慢', () => {
+test('轮数刷新走 revision 增量判断，没变化就不读事件流', () => {
+  assert.ok(host.includes('async function countTurnsCached'), '应有带缓存的计数')
+  assert.ok(host.includes('turnCountCache'), '应有 revision → 轮数 的缓存')
+  const body = host.slice(host.indexOf('async function countTurnsCached'),
+    host.indexOf('async function countTurnsCached') + 900)
+  assert.ok(body.includes('hit.revision === revision'), 'revision 未变应直接复用')
+})
+
+test('未预热的会话这次先跳过，由后台预热补齐', () => {
+  assert.ok(host.includes('function warmTurnCounts'), '应有后台预热')
   const body = host.slice(host.indexOf('async function refreshTurnCounts'),
-    host.indexOf('async function refreshTurnCounts') + 1500)
-  assert.ok(body.includes('onlySessionId'), '应支持只刷一个会话')
-  assert.ok(body.includes('id !== String(onlySessionId)'), '应跳过非当前会话')
+    host.indexOf('async function refreshTurnCounts') + 2200)
+  assert.ok(body.includes('!turnCountCache.has(id)'), '未预热的会话应跳过，避免首屏等 3.8 秒')
+  assert.ok(body.includes('isActive'), '当前会话仍要这次就刷准')
 })
 
 // ── 5. 两处搜索分工不重叠 ──────────────────────────────────────────

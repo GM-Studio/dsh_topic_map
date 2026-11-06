@@ -14,6 +14,7 @@ import { strict as assert } from 'node:assert'
 import { readFileSync } from 'node:fs'
 
 const src = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+const host = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
 
 let passed = 0
 const failures = []
@@ -183,7 +184,65 @@ test('右栏搜索匹配数会显示出来', () => {
   assert.ok(src.includes('dsh_tm_tlbhit'), '应有匹配计数徽章')
 })
 
+// ── 8. 左栏数字：对话层显示「N 段 · M 轮」────────────────────────
+test('对话层显示段数与轮数，而不是会话数', () => {
+  assert.ok(src.includes("sumSegs + ' 段 · ' + sumTurns + ' 轮'"), '应拼出「N 段 · M 轮」')
+  // 段数来自 laneCount，当前会话用实时值纠正
+  assert.ok(src.includes('sess.laneCount'), '应读会话的 laneCount')
+  assert.ok(src.includes('liveLaneCount'), '当前会话应使用实时段数纠正')
+})
+
+test('一级话题仍显示会话数（不改成段数）', () => {
+  const seg = src.slice(src.indexOf("className: 'dsh_tm_ccatn'"), src.indexOf("className: 'dsh_tm_ccatn'") + 120)
+  assert.ok(seg.includes('shown'), '话题层应显示会话数 shown')
+})
+
+// ── 9. 右栏顶部：归属路径取代「未分类」──────────────────────────
+test('右栏顶部显示归属路径，不再读已删除的阶段名', () => {
+  const at = src.indexOf("className: 'dsh_tm_tlpath'")
+  assert.ok(at > 0, '应能找到路径元素')
+  const seg = src.slice(at, at + 300)
+  assert.ok(seg.includes('ownerPath'), '应读 ownerPath')
+  assert.equal(seg.includes('stageName'), false, '不应再读 stageName（阶段系统已删，只会永远显示未分类）')
+})
+
+test('ownerPathOf 从归类树里查话题›对话', () => {
+  assert.ok(src.includes('function ownerPathOf'), '应有 ownerPathOf')
+  const body = src.slice(src.indexOf('function ownerPathOf'), src.indexOf('function ownerPathOf') + 1200)
+  assert.ok(body.includes("tree[i].name + ' › ' + subs[j].name"), '应拼出 话题 › 对话')
+})
+
+// ── 10. 后端：段数透传与降级保护 ────────────────────────────────
+test('归类时计算每条会话的段数', () => {
+  assert.ok(host.includes('assignLanes({ turns: facts'), '应用 assignLanes 算段数')
+  assert.ok(host.includes('laneCount,'), '应把 laneCount 带进 raw')
+})
+
+test('段数一路透传到归类树（提炼阶段不能丢）', () => {
+  const digest = readFileSync(new URL('../lib/session-digest.js', import.meta.url), 'utf8')
+  assert.ok(digest.includes('laneCount'), 'prepareDigestInput 应保留 laneCount')
+  const toCat = digest.slice(digest.indexOf('export function toCategoryInput'),
+    digest.indexOf('export function toCategoryInput') + 700)
+  assert.ok(toCat.includes('laneCount'), 'toCategoryInput 必须透传 laneCount（漏了会导致段数全是 0）')
+})
+
+test('模型全失败时不覆盖好缓存', () => {
+  assert.ok(host.includes('allFailed'), '应有降级判定')
+  assert.ok(host.includes('if (!allFailed)'), '降级时不应写缓存')
+})
+
+test('LLM 调用用 prepared.config 派发', () => {
+  const llm = readFileSync(new URL('../lib/llm-call.js', import.meta.url), 'utf8')
+  assert.ok(llm.includes('prepared.config'), '应用准备后的配置派发（否则报 config changed）')
+  assert.ok(llm.includes('reasoningEffort'), '应请求低推理强度（带推理模型会把预算吃光）')
+  assert.ok(llm.includes('模型没有输出正文'), '空正文应显式报错，便于定位')
+})
+
 console.log(`\n${passed} passed, ${failures.length} failed`)
+if (failures.length > 0) {
+  for (const f of failures) console.error(`\n${f.name}\n${f.error.stack}`)
+  process.exit(1)
+}
 if (failures.length > 0) {
   for (const f of failures) console.error(`\n${f.name}\n${f.error.stack}`)
   process.exit(1)

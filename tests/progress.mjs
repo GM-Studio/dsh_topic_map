@@ -35,7 +35,7 @@ test('新运行停在第 1 步', () => {
 })
 
 test('三个步骤都有 id 与中文名', () => {
-  assert.equal(ANALYSIS_STEPS.length, 4)
+  assert.equal(ANALYSIS_STEPS.length, 2)
   for (const s of ANALYSIS_STEPS) {
     assert.ok(s.id && s.label && s.detail)
   }
@@ -44,18 +44,17 @@ test('三个步骤都有 id 与中文名', () => {
 // ── 推进 ────────────────────────────────────────────────────────────
 test('推进到第 2 步时第 1 步标记完成', () => {
   let r = startRun('s', 1000)
-  r = advanceRun(r, 'workflow', 2000)
-  assert.equal(r.step, ANALYSIS_STEPS.findIndex(x => x.id === 'workflow'))
-  assert.equal(r.steps.segment, 'done')
-  assert.equal(r.steps.merge, 'done', '中间步应被标完成')
-  assert.equal(r.steps.workflow, 'active')
+  r = advanceRun(r, 'merge', 2000)
+  assert.equal(r.step, ANALYSIS_STEPS.findIndex(x => x.id === 'merge'))
+  assert.equal(r.steps.segment, 'done', '第 1 步应完成')
+  assert.equal(r.steps.merge, 'active', '当前步应为 active')
 })
 
 test('推进不修改入参（不可变）', () => {
   const before = startRun('s', 1000)
-  const after = advanceRun(before, 'workflow', 2000)
+  const after = advanceRun(before, 'merge', 2000)
   assert.equal(before.step, 0, '原对象不应被改')
-  assert.equal(after.step, 2)
+  assert.equal(after.step, 1, '第二步索引为 1')
 })
 
 test('未知步骤 id 被忽略', () => {
@@ -65,33 +64,32 @@ test('未知步骤 id 被忽略', () => {
 
 test('跳步推进也把中间步标完成', () => {
   let r = startRun('s', 1000)
-  r = advanceRun(r, 'stage', 2000)
+  // 只有两步，推进到最后一步：第 1 步完成、第 2 步 active
+  r = advanceRun(r, 'merge', 2000)
   assert.equal(r.steps.segment, 'done')
-  assert.equal(r.steps.workflow, 'done')
-  assert.equal(r.steps.stage, 'active')
+  assert.equal(r.steps.merge, 'active')
 })
 
 // ── 结束 ────────────────────────────────────────────────────────────
 test('正常结束把所有步骤标完成', () => {
   let r = startRun('s', 1000)
-  r = advanceRun(r, 'stage', 2000)
+  r = advanceRun(r, 'merge', 2000)
   r = finishRun(r, RUN_STATUS.done, null, 3000)
   assert.equal(r.status, 'done')
   assert.equal(r.step, ANALYSIS_STEPS.length)
   assert.equal(r.label, '完成')
-  for (const id of ['segment', 'workflow', 'stage']) {
+  for (const id of ['segment', 'merge']) {
     assert.equal(r.steps[id], 'done', `${id} 应完成`)
   }
 })
 
 test('失败时当前步标记 failed', () => {
   let r = startRun('s', 1000)
-  r = advanceRun(r, 'workflow', 2000)
+  r = advanceRun(r, 'merge', 2000)
   r = finishRun(r, RUN_STATUS.failed, '上游 502', 3000)
   assert.equal(r.status, 'failed')
-  assert.equal(r.steps.workflow, 'failed')
+  assert.equal(r.steps.merge, 'failed', '当前步应标失败')
   assert.equal(r.steps.segment, 'done', '已完成的步骤保持完成')
-  assert.equal(r.steps.stage, 'pending', '未开始的保持 pending')
 })
 
 test('失败原因被截断（不塞长栈）', () => {
@@ -109,14 +107,14 @@ test('取消也记录状态', () => {
 // ── 视图 ────────────────────────────────────────────────────────────
 test('视图给出步骤列表与耗时', () => {
   let r = startRun('s', 1000)
-  r = advanceRun(r, 'workflow', 5000)
+  r = advanceRun(r, 'merge', 5000)
   const v = runView(r, 6000)
   assert.equal(v.active, true)
-  assert.equal(v.currentStep, ANALYSIS_STEPS.findIndex(x => x.id === 'workflow'))
+  assert.equal(v.currentStep, ANALYSIS_STEPS.findIndex(x => x.id === 'merge'))
   assert.equal(v.totalSteps, ANALYSIS_STEPS.length)
   assert.equal(v.elapsedMs, 5000)
   assert.equal(v.steps[0].state, 'done')
-  var wfAt = ANALYSIS_STEPS.findIndex(x => x.id === 'workflow')
+  var wfAt = ANALYSIS_STEPS.findIndex(x => x.id === 'merge')
   assert.equal(v.steps[wfAt].state, 'active')
 })
 
@@ -171,9 +169,9 @@ test('清除后读不到', () => {
 test('set 能更新记录', () => {
   const store = new ProgressStore()
   let r = store.start('a', 1000)
-  r = advanceRun(r, 'workflow', 2000)
+  r = advanceRun(r, 'merge', 2000)
   store.set('a', r)
-  assert.equal(store.get('a').step, 2)
+  assert.equal(store.get('a').step, 1, '两步的第二步索引为 1')
 })
 
 console.log(`\n${passed} passed, ${failures.length} failed`)

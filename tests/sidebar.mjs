@@ -122,6 +122,37 @@ test('折叠状态按工作区持久化', () => {
   assert.ok(src.includes('persistTreeFold'), '应有持久化函数')
 })
 
+// ── 6. 中间 → 左栏 的反向联动 ───────────────────────────────────────
+test('进入层级统一走 enterScope（不能直接 setLaneScope）', () => {
+  // enterScope 会同时展开左栏并滚动到该行。
+  // 直接 setLaneScope 就会漏掉联动，导致"中间变了、左栏没动"。
+  const direct = (src.split('setLaneScope({').length - 1)
+  assert.equal(direct, 0, '不应再有直接 setLaneScope({...}) 的调用，应改用 enterScope')
+  assert.ok(src.includes('function enterScope'), '应有 enterScope 函数')
+})
+
+test('enterScope 会展开左栏对应分区', () => {
+  assert.ok(src.includes('function syncTreeToScope'), '应有 syncTreeToScope')
+  const body = src.slice(src.indexOf('function syncTreeToScope'), src.indexOf('function enterScope'))
+  assert.ok(body.includes("'cat:' + topicName"), '应构造话题折叠键')
+  assert.ok(body.includes("':sub:' + dialogName"), '应构造对话折叠键')
+  assert.ok(body.includes('delete folded[catKey]'), '应展开话题')
+  assert.ok(body.includes('delete folded[subKey]'), '应展开对话')
+})
+
+test('enterScope 会滚动到对应的左栏行', () => {
+  const body = src.slice(src.indexOf('function syncTreeToScope'), src.indexOf('function enterScope'))
+  assert.ok(body.includes('scrollIntoView'), '应调用 scrollIntoView')
+  assert.ok(body.includes('requestAnimationFrame'), '应等 DOM 更新后再滚')
+})
+
+test('对话层级下父话题也高亮', () => {
+  // 从 crumbs 里找父话题，这样进入对话后左栏的话题行也亮着
+  const seg = src.slice(src.indexOf('高亮当前层级'), src.indexOf('高亮当前层级') + 900)
+  assert.ok(seg.includes('crumbs'), '话题高亮应检查 crumbs')
+  assert.ok(seg.includes("crumbs[ci2].level === 'topic'"), '应从 crumbs 找父话题')
+})
+
 console.log(`\n${passed} passed, ${failures.length} failed`)
 if (failures.length > 0) {
   for (const f of failures) console.error(`\n${f.name}\n${f.error.stack}`)

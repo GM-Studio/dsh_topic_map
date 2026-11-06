@@ -34,9 +34,13 @@ try {
   process.exit(2)
 }
 
-console.log(`Host 自报  ${live.engineVersion}`)
+// health 走 { ok, value } 信封（与其它端点统一）。
+// 兼容旧形状：插件是热重载的，可能刚换成新代码而 DSH 里还是旧的。
+const liveVersion = live?.value?.engineVersion ?? live?.engineVersion ?? null
 
-if (live.engineVersion !== diskVersion) {
+console.log(`Host 自报  ${liveVersion}`)
+
+if (liveVersion !== diskVersion) {
   console.log('\n结论：Host 仍在运行旧代码。')
   console.log('ESM 模块在进程内被缓存，改文件不会重新执行。')
   console.log('\n处理：重启 DSH，然后强刷页面（Ctrl+Shift+R）。')

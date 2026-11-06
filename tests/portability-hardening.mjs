@@ -13,7 +13,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { readFileSync, mkdtempSync, writeFileSync, mkdirSync, rmSync, utimesSync, existsSync } from 'node:fs'
+import { readFileSync, mkdtempSync, writeFileSync, mkdirSync, rmSync, utimesSync, existsSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 
@@ -156,6 +156,103 @@ await test('零工作区时「归类」按钮置灰并说明', () => {
   assert.ok(src.includes('还没有登记任何工作区，无法归类'), '应说明为什么点不了')
   assert.ok(src.includes("disabled: sessionTree.busy || (sessionTree.workspaces ?? []).length === 0"),
     '没有工作区时应禁用归类')
+})
+
+
+// ── 7. health 统一信封 ────────────────────────────────────────────
+await test('health 走统一 { ok, value } 信封', () => {
+  const at2 = host.indexOf("action === 'health'")
+  assert.ok(at2 > 0, '应能找到 health 路由')
+  const seg = host.slice(at2, at2 + 320)
+  assert.ok(seg.includes('value: { engineVersion'), 'engineVersion 应在 value 里')
+  assert.equal(seg.includes('{ ok: true, engineVersion'), false, '不应再放在顶层')
+})
+
+await test('check-host 能同时读新旧两种 health 形状（热重载期间可能不一致）', () => {
+  const chk = readFileSync(new URL('../check-host.mjs', here), 'utf8')
+  assert.ok(chk.includes('value?.engineVersion'), '应先读新形状')
+  assert.ok(chk.includes('?? live?.engineVersion'), '再兼容旧形状')
+})
+
+// ── 8. 缓存清理按"最后使用"而不是"最后写入" ──────────────────────
+await test('读到缓存会刷新 mtime，且每个进程每文件只刷一次', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'tm-touch-'))
+  const file = join(root, 'a.json')
+  writeFileSync(file, '{}')
+  const past = (Date.now() - 300 * 24 * 60 * 60 * 1000) / 1000
+  utimesSync(file, past, past)
+
+  // 抽出 touchedCache + touchCacheFile，注入可控的 utimes
+  const startAt = host.indexOf('const touchedCache = new Set()')
+  const fnAt = host.indexOf('function touchCacheFile(path) {', startAt)
+  if (startAt < 0 || fnAt < 0) throw new Error('未找到 touchCacheFile')
+  let depth = 0
+  let end = fnAt
+  for (let i = host.indexOf('{', fnAt); i < host.length; i += 1) {
+    if (host[i] === '{') depth += 1
+    else if (host[i] === '}') { depth -= 1; if (depth === 0) { end = i + 1; break } }
+  }
+  const body = host.slice(startAt, end)
+  let calls = 0
+  // 注入的 utimes 既要计数，也要真的改 mtime —— 否则"是否刷新"根本测不到
+  const touch = new Function('utimes',
+    `${body}
+     return touchCacheFile`)((f, atime, mtime) => {
+    calls += 1
+    return import('node:fs/promises').then(m => m.utimes(f, atime, mtime))
+  })
+
+  touch(file)
+  touch(file)
+  touch(file)
+  assert.equal(calls, 1, '同一文件在同一进程里只应 touch 一次')
+
+  await new Promise(r => setTimeout(r, 20))
+  const after = statSync(file).mtimeMs
+  assert.ok(Date.now() - after < 60 * 60 * 1000, 'mtime 应被刷新到最近')
+  rmSync(root, { recursive: true, force: true })
+})
+
+await test('被用过但很久没写入的缓存不会被清理掉（真正的 LRU）', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'tm-lru-'))
+  const ui = join(root, 'ui')
+  const seg = join(root, 'segments')
+  mkdirSync(ui, { recursive: true })
+  mkdirSync(seg, { recursive: true })
+
+  const usedOften = join(ui, 'workspace-category-often.json')
+  const cold = join(ui, 'workspace-category-cold.json')
+  writeFileSync(usedOften, '{}')
+  writeFileSync(cold, '{}')
+
+  const past = (Date.now() - 300 * 24 * 60 * 60 * 1000) / 1000
+  utimesSync(usedOften, past, past)
+  utimesSync(cold, past, past)
+
+  // 只"使用"第一个：模拟读到缓存后 touch
+  const now = new Date()
+  utimesSync(usedOften, now, now)
+
+  // 抽出 pruneOldCache 并对这个临时根目录跑一遍
+  const startAt = host.indexOf('async function pruneOldCache')
+  let depth = 0
+  let end = startAt
+  for (let i = host.indexOf('{', startAt); i < host.length; i += 1) {
+    if (host[i] === '{') depth += 1
+    else if (host[i] === '}') { depth -= 1; if (depth === 0) { end = i + 1; break } }
+  }
+  const body = host.slice(startAt, end)
+  const fsPromises = await import('node:fs/promises')
+  const prune = new Function('topicMapDir', 'join', 'readdir', 'stat', 'unlink',
+    `const CACHE_KEEP_DAYS = 90
+     ${body}
+     return pruneOldCache`)(() => root, join, fsPromises.readdir, fsPromises.stat, fsPromises.unlink)
+
+  const removed = await prune(90)
+  assert.equal(removed, 1, '只应删掉真正的冷数据')
+  assert.equal(existsSync(usedOften), true, '经常被读的缓存（只是没写）必须保留')
+  assert.equal(existsSync(cold), false, '真正没被用过的应被删掉')
+  rmSync(root, { recursive: true, force: true })
 })
 
 console.log(`\n${passed} passed, ${failures.length} failed`)

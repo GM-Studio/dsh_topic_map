@@ -110,10 +110,10 @@ test('长会话只分析最近的部分', () => {
   assert.equal(analysisWindowStart({ length: 100 }, 60), 40)
 })
 
-test('上限非法时退回默认 60', () => {
-  assert.equal(analysisWindowStart({ length: 100 }, NaN), 40)
-  assert.equal(analysisWindowStart({ length: 100 }, -5), 40)
-  assert.equal(DEFAULT_TURN_LIMIT, 60)
+test('上限非法时退回默认 50', () => {
+  assert.equal(analysisWindowStart({ length: 100 }, NaN), 50)
+  assert.equal(analysisWindowStart({ length: 100 }, -5), 50)
+  assert.equal(DEFAULT_TURN_LIMIT, 50)
 })
 
 // ── 由归属构建泳道（核心）──────────────────────────────────────────

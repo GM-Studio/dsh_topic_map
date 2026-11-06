@@ -80,7 +80,8 @@ test('连续点击只执行最后一次；等待期间切换会话则取消旧�
 
 test('找不到精确用户行就提示失败，不用过程行或下一轮冒充成功', async () => {
   const s = setup(); s.jump(7); s.scene.key = 'user:7'; s.loads[0].resolve(); await flush()
-  for (let i = 0; i < 40; i++) s.tick()
+  // 跳到"放弃"要跑满 80 次重试预算（大会话需要更多时间等虚拟列表渲染）
+  for (let i = 0; i < 90; i++) s.tick()
   assert.equal(s.calls.includes('reveal'), false)
   assert.ok(s.calls.some(c => Array.isArray(c) && c[0] === 'error'))
 })

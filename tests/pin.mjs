@@ -169,6 +169,18 @@ test('连续多次内容变化都能跟上', () => {
   }
 })
 
+test('宿主自动回到底部不等于读者滚动，仍须保持所选用户输入', () => {
+  const clock = makeClock()
+  const pinToTop = build(clock)
+  const { row, scroller } = makeScene({ rowOffset: 1000 })
+  pinToTop(scroller, row)
+  clock.run(3)
+  // Chat 首次恢复/折叠完成迟到：没有 wheel、触摸或指针操作，却写回了底部。
+  scroller.scrollTop = 4000
+  clock.run(5)
+  assert.equal(scroller.scrollTop, 992, '自动回弹不能被误判为用户接管而放弃定位')
+})
+
 test('读者滚动（wheel）后立刻放手，不再抢滚动条', () => {
   const clock = makeClock()
   const pinToTop = build(clock)

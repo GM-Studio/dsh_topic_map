@@ -117,7 +117,48 @@ test('默认分析窗口是 50 轮', () => {
   assert.ok(src.includes('cfg === null ? 50 : cfg.turnLimit'), '设置面板默认也应同步为 50')
 })
 
+
+// ── 11. 前端缓存：切页签回来要"瞬间恢复" ──────────────────────────
+test('会话负载有前端缓存与 TTL', () => {
+  assert.ok(src.includes('var SESSION_CACHE = new Map()'), '应有会话缓存')
+  assert.ok(src.includes('SESSION_CACHE_TTL_MS'), '应有 TTL')
+  assert.ok(src.includes('SESSION_CACHE.set(activeSessionId'), '成功后应写入缓存')
+})
+
+test('命中缓存时不再显示 loading（不白屏、不清空）', () => {
+  const at = src.indexOf('var cachedEntry = SESSION_CACHE.get(activeSessionId)')
+  assert.ok(at > 0, '应查询缓存')
+  const seg = src.slice(at, at + 600)
+  assert.ok(seg.includes('if (cacheFresh) applyPayload(cachedEntry.payload)'), '命中即渲染')
+  assert.ok(seg.includes('else setLoading(true)'), '未命中才进 loading')
+})
+
+test('后台刷新失败时保留缓存内容', () => {
+  const at = src.indexOf('function load(attempt)')
+  const seg = src.slice(at, at + 1400)
+  assert.ok(seg.includes('if (cacheFresh) return'), '有缓存时不把界面变成错误页')
+})
+
+test('工作区树有前端缓存，且命中时不清空树', () => {
+  assert.ok(src.includes('var TREE_CACHE = new Map()'), '应有树缓存')
+  const at = src.indexOf('function loadWorkspaceTree')
+  const seg = src.slice(at, at + 1600)
+  assert.ok(seg.includes('TREE_CACHE.get(cacheKey)'), '应先查缓存')
+  assert.ok(seg.includes('if (treeFresh) {'), '命中走"直接填充"分支')
+  assert.ok(seg.includes('} else {\n          patchTree({ loading: true, tree: [], total: 0'), '未命中才清空树')
+})
+
+// ── 12. 虚拟化阈值要能覆盖真实会话（78 轮）────────────────────────
+test('虚拟化阈值降到 60，真实大会话才会启用', () => {
+  assert.ok(src.includes('var VIRT_MIN_NODES = 60'), '阈值应为 60（工作区最大会话 78 轮）')
+  assert.ok(src.includes('var LABEL_MAX_NODES = 100'), '编号降级阈值应为 100')
+})
+
 console.log(`\n${passed} passed, ${failures.length} failed`)
+if (failures.length > 0) {
+  for (const f of failures) console.error(`\n${f.name}\n${f.error.stack}`)
+  process.exit(1)
+}
 if (failures.length > 0) {
   for (const f of failures) console.error(`\n${f.name}\n${f.error.stack}`)
   process.exit(1)

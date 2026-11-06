@@ -35,8 +35,10 @@ test('快速 A→B 切换时，迟到的 A 分类和统计不能覆盖 B；加�
   const calls = []
   const state = { tree: [category('旧', [{ sessionId: 'old', turns: 999 }])], total: 1, uncategorized: [] }
   const post = (action, body) => { const d = deferred(); calls.push({ action, body, ...d }); return d.promise }
-  const load = new Function('post', 'patchTree', 'workspaceRequestRef', 'inferWorkspaceId', 'activeSessionId',
-    extract('loadWorkspaceTree') + '; return loadWorkspaceTree')(post, patch => Object.assign(state, patch), { current: 0 }, () => 'a', 'live')
+  // TREE_CACHE / TTL 也要注入：loadWorkspaceTree 会用它们做前端缓存
+  const treeCache = new Map()
+  const load = new Function('post', 'patchTree', 'workspaceRequestRef', 'inferWorkspaceId', 'activeSessionId', 'TREE_CACHE', 'TREE_CACHE_TTL_MS',
+    extract('loadWorkspaceTree') + '; return loadWorkspaceTree')(post, patch => Object.assign(state, patch), { current: 0 }, () => 'a', 'live', treeCache, 60000)
   load('a'); assert.deepEqual(state.tree, [])
   calls[0].resolve([{ id: 'a' }, { id: 'b' }]); await flush()
   const a = calls.find(c => c.action === 'categorize')

@@ -14,6 +14,7 @@ import {
   SESSION_LIMIT,
   SUBCATEGORY_LIMIT,
   buildCategoryPrompt,
+  canReuseCategoryCache,
   buildCategoryTree,
   buildRenamePrompt,
   collectNames,
@@ -309,6 +310,50 @@ test('origin 缺失时退回正则（实测当前 DSH 不填这个字段）', ()
   assert.equal(looksAutomated({ title: '[dsh-mnemon:delegated review]', firstPrompt: '', origin: undefined }), true)
 })
 
+
+
+// ── 归类缓存复用判定 ────────────────────────────────────────────────
+// 这是"切页面回来空白等 25 秒"那个问题的核心。
+
+test('缓存集合完全一致时复用', () => {
+  assert.equal(canReuseCategoryCache(['a','b','c'], ['a','b','c']), true)
+})
+
+test('空会话不算变化（真实场景：33 个里 1 个空会话被过滤）', () => {
+  // 缓存里 32 个（已过滤空会话），当前工作区 33 个（含那个空会话）
+  const cached = Array.from({ length: 32 }, (_, i) => 's' + i)
+  const live = [...cached, 'empty-one']
+  assert.equal(canReuseCategoryCache(cached, live, 3), true,
+    '多出一个空会话时不该让缓存失效')
+})
+
+test('新增少量会话仍复用（避免一条新对话等 25 秒）', () => {
+  const cached = ['a','b','c']
+  assert.equal(canReuseCategoryCache(cached, ['a','b','c','d'], 3), true)
+  assert.equal(canReuseCategoryCache(cached, ['a','b','c','d','e'], 3), true)
+})
+
+test('新增过多会话则重算', () => {
+  const cached = ['a','b','c']
+  assert.equal(canReuseCategoryCache(cached, ['a','b','c','d','e','f','g'], 3), false)
+})
+
+test('缓存里的会话消失了则必须重算', () => {
+  assert.equal(canReuseCategoryCache(['a','b','c'], ['a','b']), false)
+})
+
+test('空缓存不复用', () => {
+  assert.equal(canReuseCategoryCache([], ['a','b']), false)
+  assert.equal(canReuseCategoryCache(null, ['a']), false)
+})
+
+test('当前集合为空但缓存非空则不匹配', () => {
+  assert.equal(canReuseCategoryCache(['a'], []), false)
+})
+
+test('id 类型不一致也能正确比对（字符串归一）', () => {
+  assert.equal(canReuseCategoryCache(['a', 2], ['a', '2']), true)
+})
 
 console.log(`\n${passed} passed, ${failures.length} failed`)
 if (failures.length > 0) {

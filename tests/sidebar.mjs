@@ -153,6 +153,36 @@ test('对话层级下父话题也高亮', () => {
   assert.ok(seg.includes("crumbs[ci2].level === 'topic'"), '应从 crumbs 找父话题')
 })
 
+// ── 7. 两个搜索框的分工 ─────────────────────────────────────────────
+test('中间筛选条已删除（只留顶栏与右栏两个搜索）', () => {
+  assert.equal(src.includes('function FilterBar'), false, 'FilterBar 组件应已删除')
+  assert.equal(src.includes('h(FilterBar'), false, 'FilterBar 不应再被挂载')
+  // 已失效的筛选维度也不该残留
+  assert.equal(src.includes('stageOptions'), false, '阶段筛选已失效，应删除')
+  assert.equal(src.includes('toggleInList'), false, '多选切换只服务于旧筛选条，应删除')
+})
+
+test('顶栏搜索仍只筛左栏（跨会话）', () => {
+  assert.ok(src.includes("className: 'dsh_tm_wssearch'"), '顶栏应有工作区搜索框')
+  // 顶栏搜索的 onChange 应该更新左栏树的 query，而不是筛当前会话轮次
+  const idx = src.indexOf("className: 'dsh_tm_wssearch'")
+  const seg = src.slice(idx, idx + 1200)
+  assert.ok(seg.includes('patchTree({ query'), '顶栏搜索应更新左栏树的 query')
+})
+
+test('右栏有会话内搜索，且只筛轮次', () => {
+  assert.ok(src.includes("className: 'dsh_tm_tlsearch'"), '右栏应有搜索框容器')
+  assert.ok(src.includes("placeholder: '搜本会话轮次…'"), '右栏搜索的占位文案应说明只搜本会话')
+  // 过滤逻辑：匹配 prompt 或 response
+  const seg = src.slice(src.indexOf('搜索过滤：匹配提问或回复内容'), src.indexOf('搜索过滤：匹配提问或回复内容') + 700)
+  assert.ok(seg.includes('f.prompt'), '应匹配提问')
+  assert.ok(seg.includes('f.response'), '应匹配回复')
+})
+
+test('右栏搜索匹配数会显示出来', () => {
+  assert.ok(src.includes('dsh_tm_tlbhit'), '应有匹配计数徽章')
+})
+
 console.log(`\n${passed} passed, ${failures.length} failed`)
 if (failures.length > 0) {
   for (const f of failures) console.error(`\n${f.name}\n${f.error.stack}`)

@@ -15,7 +15,7 @@ import {
   buildAssignmentPrompt,
   parseAssignment,
 } from '../lib/semantic.js'
-import { lanesFromAssignment } from '../lib/lane-engine.js'
+import { absorbShortRuns, lanesFromAssignment } from '../lib/lane-engine.js'
 
 let passed = 0
 const failures = []
@@ -212,6 +212,56 @@ test('单话题会话得到一条泳道', () => {
   assert.equal(lanes.length, 1)
   assert.deepEqual(lanes[0].turns, [1, 2, 3])
   assert.equal(lanes[0].segments.length, 1)
+})
+
+
+// ── 短段合并：防止话题碎成一片 ────────────────────────────────────
+//
+// 真实事故：某 54 轮会话被切成 31 段，其中 22 段只有 1 轮（占 71%）。
+// 原因是「开始吧」「先跑探针」这类一句话轮次各自独立成段。
+// 用户看到的就是「话题碎成一片，看不出主线」。
+
+test('单轮段并入前一段（a a1 a2 a3 应为一个话题）', () => {
+  const runs = [{ from: 0, to: 3 }, { from: 4, to: 4 }, { from: 5, to: 5 }, { from: 6, to: 6 }]
+  const out = absorbShortRuns(runs)
+  assert.equal(out.length, 1, '应全部合并为 1 段')
+  assert.equal(out[0].from, 0)
+  assert.equal(out[0].to, 6)
+})
+
+test('已经够长的段不动', () => {
+  const out = absorbShortRuns([{ from: 0, to: 4 }, { from: 5, to: 9 }])
+  assert.equal(out.length, 2, '两段都够长，不该合并')
+})
+
+test('开头就是单轮时不会丢', () => {
+  const out = absorbShortRuns([{ from: 0, to: 0 }, { from: 1, to: 8 }])
+  assert.equal(out.length, 1, '应合并为 1 段')
+  assert.equal(out[0].from, 0, '起点必须仍是 0')
+})
+
+test('空输入与单段不崩', () => {
+  assert.equal(absorbShortRuns([]).length, 0)
+  assert.equal(absorbShortRuns([{ from: 0, to: 0 }]).length, 1)
+})
+
+test('合并后范围连续不重叠', () => {
+  const runs = [
+    { from: 0, to: 5 }, { from: 6, to: 6 }, { from: 7, to: 12 },
+    { from: 13, to: 13 }, { from: 14, to: 20 },
+  ]
+  const out = absorbShortRuns(runs)
+  for (let i = 0; i < out.length; i += 1) {
+    assert.ok(out[i].to >= out[i].from, '范围不能反转')
+    if (i > 0) assert.equal(out[i].from, out[i - 1].to + 1, '段与段之间不能有缝隙')
+  }
+})
+
+test('不修改入参', () => {
+  const runs = [{ from: 0, to: 3 }, { from: 4, to: 4 }]
+  const before = JSON.stringify(runs)
+  absorbShortRuns(runs)
+  assert.equal(JSON.stringify(runs), before, '原数组不该被改动')
 })
 
 console.log(`\n${passed} passed, ${failures.length} failed`)

@@ -1,11 +1,12 @@
 {
   "name": "dsh-topic-map",
   "version": "0.1.0",
-  "description": "话题地图：把会话变成话题关系图，像 git graph 一样看出分支、合并、主线与支线；含三层分级、状态推导与跳转",
+  "description": "话题地图：把工作区的会话画成可导航的地图——话题 → 对话 → 会话 → 泳道图，支持跨会话归类、正文检索、实时更新与跳回对话",
   "icon": "icon.svg",
   "type": "module",
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.1-rc.5"
   },
   "main": "lib/index.js",
   "exports": {
@@ -13,12 +14,10 @@
       "default": "./lib/index.js"
     },
     "./client": "./lib/client.js",
-    "./package.json": "./package.json",
-    "./locale/*.json": "./locale/*.json"
+    "./package.json": "./package.json"
   },
   "files": [
     "icon.svg",
-    "locale/*.json",
     "lib/*.js",
     "cordis.patch.yml",
     "README.md"

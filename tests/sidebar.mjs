@@ -238,7 +238,39 @@ test('LLM 调用用 prepared.config 派发', () => {
   assert.ok(llm.includes('模型没有输出正文'), '空正文应显式报错，便于定位')
 })
 
+// ── 11. 跨会话正文检索（并入顶栏搜索）────────────────────────────
+test('顶栏搜索同时触发正文检索', () => {
+  const at = src.indexOf("className: 'dsh_tm_wssearch'")
+  const seg = src.slice(at, at + 1400)
+  assert.ok(seg.includes('onFindInput('), '顶栏 onChange 应调用 onFindInput 触发正文检索')
+  assert.ok(seg.includes('patchTree({ query'), '同时仍要筛左栏结构')
+})
+
+test('检索结果渲染为「正文命中」分组', () => {
+  assert.ok(src.includes("'正文命中'"), '应有正文命中分组标题')
+  assert.ok(src.includes('dsh_tm_cfind'), '应有分组容器')
+  assert.ok(src.includes('hit.snippet'), '应显示命中片段，让用户知道为什么被搜出来')
+})
+
+test('结构没命中但正文命中时不清空中间', () => {
+  const at = src.indexOf("className: 'dsh_tm_wssearch'")
+  const seg = src.slice(at, at + 1400)
+  assert.ok(seg.includes('findHits'), '应参考正文命中结果')
+  assert.ok(seg.includes('if (hits.length === 0) setSearchEmpty(true)'),
+    '仅在两者都空时才清空中间图')
+})
+
+test('正文检索有结果时恢复中间图', () => {
+  const at = src.indexOf('function runFind')
+  const seg = src.slice(at, at + 1600)
+  assert.ok(seg.includes('setSearchEmpty(false)'), 'find 返回命中后应恢复中间图')
+})
+
 console.log(`\n${passed} passed, ${failures.length} failed`)
+if (failures.length > 0) {
+  for (const f of failures) console.error(`\n${f.name}\n${f.error.stack}`)
+  process.exit(1)
+}
 if (failures.length > 0) {
   for (const f of failures) console.error(`\n${f.name}\n${f.error.stack}`)
   process.exit(1)

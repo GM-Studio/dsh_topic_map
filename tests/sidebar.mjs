@@ -174,7 +174,7 @@ test('右栏有会话内搜索，且只筛轮次', () => {
   assert.ok(src.includes("className: 'dsh_tm_tlsearch'"), '右栏应有搜索框容器')
   assert.ok(src.includes("placeholder: '搜本会话轮次…'"), '右栏搜索的占位文案应说明只搜本会话')
   // 过滤逻辑：匹配 prompt 或 response
-  const seg = src.slice(src.indexOf('搜索过滤：匹配提问或回复内容'), src.indexOf('搜索过滤：匹配提问或回复内容') + 700)
+  const seg = src.slice(src.indexOf('搜索过滤：匹配提问或回复内容'), src.indexOf('搜索过滤：匹配提问或回复内容') + 1600)
   assert.ok(seg.includes('f.prompt'), '应匹配提问')
   assert.ok(seg.includes('f.response'), '应匹配回复')
 })

@@ -154,6 +154,29 @@ test('虚拟化阈值降到 60，真实大会话才会启用', () => {
   assert.ok(src.includes('var LABEL_MAX_NODES = 100'), '编号降级阈值应为 100')
 })
 
+// ── 13. 未归类行显示轮数 ────────────────────────────────────────
+test('未归类行显示轮数（后端已带回 turns）', () => {
+  const hit = src.indexOf("className: 'dsh_tm_ctxt' }, u.title")
+  assert.ok(hit > 0, '应能定位未归类标题')
+  const seg = src.slice(hit, hit + 400)
+  assert.ok(seg.includes('u.turns'), '应渲染轮数')
+  assert.ok(seg.includes("' 轮'"), '应带单位')
+})
+
+// ── 14. 新轮次 / 新会话的实时性 ────────────────────────────────
+test('订阅会话事件源以跟随新轮次', () => {
+  assert.ok(src.includes('binding.eventSource'), '应取会话事件源')
+  assert.ok(src.includes('source.subscribe'), '应订阅')
+  assert.ok(src.includes('lastRevision'), '应比对 revision')
+  assert.ok(src.includes('setTimeout(flush, 1200)'), '应做 1.2 秒防抖（流式会产生多条事件）')
+})
+
+test('轻量轮询发现新会话，且不动缓存', () => {
+  assert.ok(src.includes('signatureOf'), '应比对会话集合签名')
+  assert.ok(src.includes('setInterval(tick, 15000)'), '应每 15 秒轻量探测')
+  assert.ok(src.includes("if (document.visibilityState === 'hidden') return"), '不可见时不轮询')
+  assert.ok(src.includes('if (stopped || inFlight) return'), '不叠加请求')
+})
 console.log(`\n${passed} passed, ${failures.length} failed`)
 if (failures.length > 0) {
   for (const f of failures) console.error(`\n${f.name}\n${f.error.stack}`)

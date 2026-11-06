@@ -333,7 +333,17 @@ test('新增少量会话仍复用（避免一条新对话等 25 秒）', () => {
   assert.equal(canReuseCategoryCache(cached, ['a','b','c','d','e'], 3), true)
 })
 
-test('新增过多会话则重算', () => {
+test('默认不限新增数量：新会话先进「未归类」，不触发重算', () => {
+  const cached = ['a','b','c']
+  // 一次新建十几个会话是很常见的动作，重算要跑 30-40 秒模型，
+  // 不该因为"多开了几个窗口"就卡住面板。
+  const many = ['a','b','c', ...Array.from({ length: 15 }, (_, i) => 'n' + i)]
+  assert.equal(canReuseCategoryCache(cached, many), true,
+    '默认应容忍任意数量新增（它们进未归类组）')
+  assert.equal(canReuseCategoryCache(cached, ['a','b','c','d','e','f','g']), true)
+})
+
+test('显式传入容错值时仍按该值判定（保留旧语义）', () => {
   const cached = ['a','b','c']
   assert.equal(canReuseCategoryCache(cached, ['a','b','c','d','e','f','g'], 3), false)
 })

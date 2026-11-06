@@ -146,8 +146,18 @@ test('两个修复都不破坏既有结构', () => {
   assert.ok(client.includes('dsh_tm_pmfoot') === false || true, '允许 PM 面板已移除')
 })
 
+test('detailLane 计算带 null 保护', () => {
+  assert.ok(
+    client.includes('Array.isArray(data.lanes) ? data.lanes : []'),
+    'detailLane 计算应对 data 判空，否则首次加载时会白屏',
+  )
+})
+
+
 console.log(`\n${passed} passed, ${failures.length} failed`)
 if (failures.length > 0) {
   for (const f of failures) console.error(`\n${f.name}\n${f.error.stack}`)
   process.exit(1)
 }
+
+// ── 白屏回归：data 为 null 时不得提前访问 ──────────────────────────

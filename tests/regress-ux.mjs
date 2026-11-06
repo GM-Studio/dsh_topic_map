@@ -30,41 +30,32 @@ function test(name, fn) {
 
 console.log('\nregress-ux')
 
-// ── 问题 1：三级缩进 ───────────────────────────────────────────────
-test('任务缩进用内联 padding（不依赖 CSS 选择器层级）', () => {
-  // 之前 data-depth 挂在外层 div 上，CSS 选择内层 .dsh_tm_trackitem，
-  // 两者对不上 -> 缩进完全不生效
-  assert.ok(client.includes('const indent = depth === 0 ? 0 : depth === 1 ? 22 : 38')
-    || /var indent = depth === 0 \? 0 : depth === 1 \? 22 : 38/.test(client),
-    '应显式计算各层缩进')
-  assert.ok(client.includes("paddingLeft: indent + 'px'"), '应用内联 paddingLeft')
+// ── 左栏三级缩进（话题 → 对话 → 会话）────────────────────────────
+test('左栏三级缩进逐级加深', () => {
+  // 真实事故：对话和会话都用了 17px，看起来平级。
+  // 现在约定 6 / 18 / 34，形成清晰台阶。
+  const grab = (cls) => {
+    const m = client.match(new RegExp('\\.' + cls + '\\\\{[^}]*padding:3px 6px 3px (\\\\d+)px'))
+      || client.match(new RegExp('\\.' + cls + '\\\\{[^}]*padding:4px 6px'))
+    return m
+  }
+  // 话题（一级）没有左内距，用默认 4px 6px
+  assert.ok(client.includes('.dsh_tm_ccathd{') && client.includes('padding:4px 6px'),
+    '一级（话题）应无额外左缩进')
+
+  const sub = client.match(/\.dsh_tm_csubhd\{[^}]*padding:3px 6px 3px (\d+)px/)
+  const conv = client.match(/\.dsh_tm_cconv\{[^}]*padding:3px 6px 3px (\d+)px/)
+  assert.ok(sub !== null, '应能找到对话层的缩进')
+  assert.ok(conv !== null, '应能找到会话层的缩进')
+  assert.equal(Number(sub[1]), 18, '对话层缩进应为 18px')
+  assert.equal(Number(conv[1]), 34, '会话层缩进应为 34px')
+  assert.ok(Number(conv[1]) > Number(sub[1]), '会话必须比对话更深，不能平级')
 })
 
-test('深度同时挂在外层与内层（两处都能被选中）', () => {
-  const rowDepth = client.includes("className: 'dsh_tm_taskrow'") && client.includes("'data-depth': String(depth)")
-  const btnDepth = client.includes("className: 'dsh_tm_trackitem dsh_tm_taskmain'")
-  assert.ok(rowDepth, '外层 row 应带 data-depth')
-  assert.ok(btnDepth, '内层 button 应有 class（缩进改由外层控制）')
-})
-
-test('内层不再叠加左内距（避免缩进过头）', () => {
-  // 内层若仍是 22/34px，会和外层 padding 叠加
-  assert.ok(!client.includes('.dsh_tm_trackitem[data-depth="1"]{padding-left:22px}'),
-    '内层不应再有 22px 左内距')
-  assert.ok(client.includes('.dsh_tm_trackitem[data-depth="2"]{padding-left:6px}'),
-    '内层应改为小内距')
-})
-
-test('折平层的任务按第 2 级缩进（它在阶段下面）', () => {
-  // 之前传 1，会让它和工作流层平级
-  assert.ok(client.includes('renderTask(t.name, t.turns, 2)'),
-    '折平层任务应是 depth 2')
-})
-
-test('第 2 级工作流标题有独立缩进', () => {
-  assert.ok(client.includes('.dsh_tm_cathead[data-depth="1"]{padding-left:18px'),
-    '工作流标题应比阶段缩进更多')
-  assert.ok(client.includes("'data-depth': '1',"), '工作流标题应带 depth=1')
+test('左栏三层各有独立 class', () => {
+  assert.ok(client.includes("className: 'dsh_tm_ccathd'"), '话题行')
+  assert.ok(client.includes("className: 'dsh_tm_csubhd'"), '对话行')
+  assert.ok(client.includes("className: 'dsh_tm_cconv'"), '会话行')
 })
 
 // ── 问题 2：切走不丢 ───────────────────────────────────────────────

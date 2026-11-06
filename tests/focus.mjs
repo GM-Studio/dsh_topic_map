@@ -81,11 +81,12 @@ test('滚过去之后位置仍在合法范围内（不拖飞）', () => {
 
 // ── 2. 折叠键用名字 ─────────────────────────────────────────────────
 test('折叠键使用名称而非位置索引（重新分析后不错位）', () => {
-  // 现在统一由 FOLD 模块生成键，键本身仍基于名字
-  assert.ok(src.includes('FOLD.stageKey(stage.name)'), '阶段折叠键应基于名字')
-  assert.ok(src.includes('FOLD.workflowKey(stage.name, wf.name)'), '工作流折叠键应基于名字')
+  // 左栏已换成「话题 → 对话 → 会话」，折叠键基于名字：
+  //   'cat:插件开发'
+  //   'cat:插件开发:sub:话题树插件'
+  assert.ok(src.includes("var catKey = 'cat:' + cat.name"), '话题折叠键应基于名字')
+  assert.ok(src.includes("var subKey = catKey + ':sub:' + sub.name"), '对话折叠键应基于名字')
   assert.ok(!src.includes("var stageKey = 's' + si"), '不应再使用位置索引')
-  // 键的生成规则本身在 tree-fold.mjs 里被单独测过
 })
 
 // ── 3. 折叠状态持久化 ───────────────────────────────────────────────
@@ -137,14 +138,15 @@ test('连线透传 laneId，淡化才能按泳道判断', () => {
   assert.ok(src.includes('laneId: e.laneId'), '布局应把 laneId 传给连线')
 })
 
-// ── 6. 左栏状态点 ───────────────────────────────────────────────────
-test('左栏任务带状态胶囊与轮次数（状态来自 PM 推导，可手改）', () => {
-  // 状态胶囊：显示推导/标注的状态，可点击切换
-  assert.ok(src.includes('dsh_tm_state'), '应有状态胶囊')
-  assert.ok(src.includes('dsh_tm_statedot'), '胶囊里应有状态点')
-  assert.ok(src.includes('pmState.detailOf'), '状态应来自 PM 推导')
-  assert.ok(src.includes('setTaskState'), '应可手动标注')
-  assert.ok(src.includes('dsh_tm_trackn'), '应有轮次数')
+// ── 6. 状态已按需求整体移除 ─────────────────────────────────────────
+test('状态相关 UI 已移除（用户要求只看结构）', () => {
+  // 去掉的东西：胶囊、PM 推导、手动标注
+  assert.equal(src.includes('dsh_tm_state'), false, '状态胶囊应已移除')
+  assert.equal(src.includes('pmState.detailOf'), false, 'PM 推导引用应已移除')
+  assert.equal(src.includes('setTaskState'), false, '手动标注应已移除')
+  // 保留：会话与轮次信息
+  assert.ok(src.includes('dsh_tm_cconv'), '左栏仍应有会话行')
+  assert.ok(src.includes('dsh_tm_ctxt'), '会话行仍应有标题')
 })
 
 console.log(`\n${passed} passed, ${failures.length} failed`)

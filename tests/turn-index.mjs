@@ -24,6 +24,7 @@ import {
   parseIndexText,
   parseMetaLine,
   readIndexFile,
+  readIndexMeta,
   removeIndexFile,
   serializeIndex,
   syncSessionIndex,
@@ -196,7 +197,7 @@ await test('轮次行字段完整、类型正确', () => {
 
   const required = [
     'turn', 'seq', 'start', 'end', 'ms',
-    'prompt', 'response', 'tools', 'files', 'usage',
+    'prompt', 'response', 'tools', 'files', 'commands', 'usage',
     'model', 'endReason', 'interrupted', 'steps', 'truncated',
   ]
   for (const key of required) assert.ok(key in row, `缺字段：${key}`)
@@ -209,6 +210,7 @@ await test('轮次行字段完整、类型正确', () => {
   assert.equal(typeof row.prompt, 'string')
   assert.equal(typeof row.response, 'string')
   assert.deepEqual(row.tools, ['edit', 'bash'])
+  assert.deepEqual(row.commands, [], '没有 command 类参数时 commands 应为空数组')
   assert.deepEqual(row.files, ['lib/client.js', 'E:\\dsh_plugin\\lib\\client.js', 'lib/turn-index.js'])
   assert.deepEqual(row.usage, { input: 100, output: 20, cacheRead: 5, cacheWrite: 2, reasoning: 1 })
   for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'reasoning']) {
@@ -218,6 +220,76 @@ await test('轮次行字段完整、类型正确', () => {
   assert.equal(row.endReason, 'completed')
   assert.equal(row.interrupted, false)
   assert.equal(row.steps, 2)
+})
+
+await test('命令抽取：按 command→cmd→script→code→args.command→args.cmd 兜底', () => {
+  const [row] = buildTurnRows(makeEvents([{
+    prompt: '跑命令',
+    calls: [
+      { name: 'run_code', args: { command: 'echo one' } },
+      { name: 'custom_tool', args: { cmd: 'echo two' } },
+      { name: 'anything', args: { script: 'echo three' } },
+      { name: 'anything', args: { code: 'console.log(4)' } },
+      { name: 'anything', args: { args: { command: 'echo five' } } },
+      { name: 'anything', args: { args: { cmd: 'echo six' } } },
+      { name: 'anything', args: { command: 'first-wins', cmd: 'second' } },
+      { name: 'anything', args: { cmd: 'cmd-wins', code: 'code-loses' } },
+    ],
+  }]))
+  // 工具名不写死：run_code / custom_tool / anything 都按参数键抽。
+  assert.deepEqual(row.commands, [
+    'echo one',
+    'echo two',
+    'echo three',
+    'console.log(4)',
+    'echo five',
+    'echo six',
+    'first-wins',
+    'cmd-wins',
+  ])
+  assert.deepEqual(row.tools, ['run_code', 'custom_tool', 'anything'])
+})
+
+await test('命令去重、上限 8、单条 500 字符截断且无省略号', () => {
+  const long = 'x'.repeat(600)
+  const calls = [
+    { name: 'run_code', args: { command: long } },
+    { name: 'run_code', args: { command: 'a' } },
+    { name: 'run_code', args: { command: 'a' } },
+    { name: 'run_code', args: { command: 'b' } },
+    ...Array.from({ length: 9 }, (_, index) => ({
+      name: 'run_code',
+      args: { command: `c${index}` },
+    })),
+  ]
+  const [row] = buildTurnRows(makeEvents([{ prompt: 'x', calls }]))
+  assert.equal(row.commands.length, 8, '每轮命令上限应为 8')
+  assert.deepEqual(row.commands, [
+    long.slice(0, 500), 'a', 'b', 'c0', 'c1', 'c2', 'c3', 'c4',
+  ])
+  assert.equal(row.commands[0].length, 500)
+  assert.equal(row.commands[0].endsWith('…'), false, '截断不应追加省略号')
+  assert.equal(row.commands.includes('c5'), false)
+})
+
+await test('空值/非字符串/坏 JSON 不产生命令', () => {
+  const events = makeEvents([{
+    prompt: 'x',
+    calls: [
+      { name: 'run_code', args: { command: '   ' } },
+      { name: 'run_code', args: { command: 123 } },
+      { name: 'run_code', args: {} },
+    ],
+  }])
+  // 参数不是合法 JSON 时也不能造出命令。
+  events.splice(events.length - 1, 0, {
+    type: 'tool/call',
+    seq: 9999,
+    time: BASE_TIME + 1,
+    data: { name: 'run_code', arguments: '{bad json' },
+  })
+  const [row] = buildTurnRows(events)
+  assert.deepEqual(row.commands, [])
 })
 
 await test('中断标记来自 assistant/message，结束原因原样保留', () => {
@@ -351,6 +423,55 @@ await test('revision 数字入参按字符串比较', async () => {
     const second = await syncSessionIndex({ dir, sessionId: 'sess-num', revision: 42, loadEvents: async () => events })
     assert.equal(second.skipped, true)
     assert.equal(parseIndexText(await readFile(first.path, 'utf8')).meta.revision, '42')
+  })
+})
+
+await test('schema 1 旧索引判定过期并整体重建，补出 commands', async () => {
+  await withTempDir(async dir => {
+    const events = makeEvents([{
+      prompt: '旧索引',
+      calls: [{ name: 'ops_bash', args: { command: 'echo hi' } }],
+    }])
+    const first = await syncSessionIndex({
+      dir,
+      sessionId: 'sess-schema',
+      revision: 'rev-1',
+      loadEvents: async () => events,
+    })
+
+    // 手工退回 schema 1：改 meta、删掉行里的 commands，模拟老版本产物。
+    const lines = (await readFile(first.path, 'utf8')).trimEnd().split('\n')
+    const meta = JSON.parse(lines[0])
+    meta.schema = 1
+    const rows = lines.slice(1).map(line => {
+      const row = JSON.parse(line)
+      delete row.commands
+      return JSON.stringify(row)
+    })
+    await writeFile(first.path, [JSON.stringify(meta), ...rows].join('\n') + '\n', 'utf8')
+
+    assert.equal(await readIndexMeta(dir, 'sess-schema'), null, 'schema 1 不该被当成可用索引')
+    const stale = await readIndexFile(dir, 'sess-schema')
+    assert.equal(stale.ok, false)
+    assert.equal(stale.reason, 'meta')
+
+    let loads = 0
+    const second = await syncSessionIndex({
+      dir,
+      sessionId: 'sess-schema',
+      revision: 'rev-1',
+      loadEvents: async () => {
+        loads += 1
+        return events
+      },
+    })
+    assert.equal(second.skipped, false, 'schema 1 必须触发重建')
+    assert.equal(second.reason, 'meta')
+    assert.equal(loads, 1)
+    const parsed = parseIndexText(await readFile(second.path, 'utf8'))
+    assert.equal(parsed.meta.schema, INDEX_SCHEMA)
+    assert.equal(parsed.meta.schema, 2)
+    assert.deepEqual(parsed.turns[0].commands, ['echo hi'])
   })
 })
 

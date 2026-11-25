@@ -148,7 +148,7 @@ await test('详情字段完整（索引命中）', async () => {
     assert.equal(result.ok, true, result.error)
     const detail = result.value.turn
     assert.deepEqual(Object.keys(detail).sort(), [
-      'changes', 'end', 'endReason', 'files', 'interrupted', 'model', 'ms',
+      'changes', 'commands', 'end', 'endReason', 'files', 'interrupted', 'model', 'ms',
       'prompt', 'response', 'seq', 'start', 'steps', 'tools', 'truncated',
       'turn', 'usage',
     ])
@@ -166,6 +166,7 @@ await test('详情字段完整（索引命中）', async () => {
     assert.equal(detail.steps, 2)
     assert.deepEqual(detail.tools, ['edit'])
     assert.deepEqual(detail.files, ['lib/client.js'])
+    assert.deepEqual(detail.commands, [])
     assert.equal(detail.changes, null)
     assert.equal(detail.truncated, false)
 
@@ -178,6 +179,24 @@ await test('详情字段完整（索引命中）', async () => {
     assert.ok(head.promptHead.length <= 40)
     assert.equal(head.time, BASE_TIME + 5000, 'time 应取该轮结束时刻')
     assert.equal(head.endReason, 'completed')
+  })
+})
+
+await test('详情透传 commands（schema 2）', async () => {
+  await withTempHome(async () => {
+    const events = makeEvents([{
+      prompt: '跑测试',
+      calls: [
+        { name: 'run_code', args: { command: 'npm test' } },
+        { name: 'run_code', args: { code: 'console.log(1)' } },
+      ],
+    }])
+    const ctx = makeCtx({ events: { 'sess-1': events } })
+    await syncSessionIndexFor(ctx, 'sess-1')
+
+    const result = await readTurnDetail(ctx, { sessionId: 'sess-1', turn: 0 })
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.value.turn.commands, ['npm test', 'console.log(1)'])
   })
 })
 

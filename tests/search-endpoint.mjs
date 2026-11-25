@@ -165,6 +165,53 @@ await test('索引可用：命中带上 sessionId/title，按会话分组不塌'
   })
 })
 
+await test('命中带 commandCount（schema 2；分组时组上给总数）', async () => {
+  await withTempHome(async () => {
+    const events = {
+      'sess-cmd': makeEvents([
+        {
+          prompt: '跑命令 关键词',
+          calls: [
+            { name: 'run_code', args: { command: 'npm test' } },
+            { name: 'run_code', args: { command: 'npm run build' } },
+          ],
+        },
+        { prompt: '没命令 关键词' },
+      ]),
+      'sess-nocmd': makeEvents([{ prompt: '关键词 无命令' }]),
+    }
+    const { ctx } = makeCtx({ events })
+    await syncSessionIndexFor(ctx, 'sess-cmd')
+    await syncSessionIndexFor(ctx, 'sess-nocmd')
+
+    const flat = await searchWorkspaceIndex(ctx, {
+      workspaceId: 'ws-1',
+      keywords: '关键词',
+      limit: 10,
+      now: BASE_TIME + 10_000,
+    })
+    const withCommands = flat.hits.find(hit => hit.sessionId === 'sess-cmd' && hit.turn === 0)
+    assert.equal(withCommands.commandCount, 2)
+    const withoutCommands = flat.hits.find(hit => hit.sessionId === 'sess-cmd' && hit.turn === 1)
+    assert.equal(withoutCommands.commandCount, 0)
+    const other = flat.hits.find(hit => hit.sessionId === 'sess-nocmd')
+    assert.equal(other.commandCount, 0)
+
+    const grouped = await searchWorkspaceIndex(ctx, {
+      workspaceId: 'ws-1',
+      keywords: '关键词',
+      groupBy: 'session',
+      limit: 10,
+      now: BASE_TIME + 10_000,
+    })
+    const group = grouped.hits.find(item => item.sessionId === 'sess-cmd')
+    assert.ok(Array.isArray(group.hits))
+    assert.equal(group.hits.find(hit => hit.turn === 0).commandCount, 2)
+    assert.equal(group.hits.find(hit => hit.turn === 1).commandCount, 0)
+    assert.equal(group.commandCount, 2, '分组上应是组内命令总数')
+  })
+})
+
 await test('索引缺失的会话也进结果（回退全文抽取），并计入 missing', async () => {
   await withTempHome(async () => {
     const tail = '预览外尾巴词'

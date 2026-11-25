@@ -274,12 +274,30 @@ class FakeDocument {
   }
 }
 
-/** 假 window：定时器队列 + getComputedStyle + 存储。 */
+/** 假 window：定时器队列 + getComputedStyle + 存储 + 可触发的 MutationObserver。 */
 function makeWindow(store) {
   const timers = []
+  const observers = []
   let nextId = 1
+  class FakeObserver {
+    constructor(callback) {
+      this.callback = callback
+      this.target = null
+      this.options = null
+      this.connected = false
+    }
+    observe(target, options) {
+      this.target = target
+      this.options = options === undefined ? null : options
+      this.connected = true
+      observers.push(this)
+    }
+    disconnect() { this.connected = false }
+    takeRecords() { return [] }
+  }
   return {
     timers,
+    observers,
     setTimeout(fn, delay) {
       const timer = { id: nextId, delay: delay === undefined ? 0 : delay, fn, cancelled: false }
       nextId += 1
@@ -291,21 +309,23 @@ function makeWindow(store) {
         if (timer.id === id) timer.cancelled = true
       }
     },
-    /** 运行所有未取消的定时器（测试用；真实浏览器等 1500ms 即可）。 */
+    /** 运行所有未取消的定时器（测试用；真实浏览器按 delay 等待）。 */
     runTimers() {
       const due = timers.splice(0)
       for (const timer of due) {
         if (!timer.cancelled) timer.fn()
       }
     },
+    /** 向观察某节点的 MutationObserver 派发一批 mutation 记录。 */
+    fireMutation(target, records) {
+      for (const observer of observers) {
+        if (observer.connected && observer.target === target) observer.callback(records)
+      }
+    },
     getComputedStyle() { return { right: '12px', top: '300px', maxHeight: '420px' } },
     addEventListener() {},
     removeEventListener() {},
-    MutationObserver: class {
-      constructor(callback) { this.callback = callback }
-      observe() {}
-      disconnect() {}
-    },
+    MutationObserver: FakeObserver,
     localStorage: store,
   }
 }
@@ -728,28 +748,33 @@ await test('Alt+[ 切换折叠/展开', async () => {
   dispose()
 })
 
-await test('自动隐藏：离开 1.5 秒收成半透明细条，移入立即恢复；默认开', async () => {
+await test('自动折叠：离开 600ms 收成 16px 竖条，移入立即展开；默认开', async () => {
   const scene = buildScene()
   const { RAILTAKE, dispose, win, store } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
   await flush()
   const rail = railOf(scene.doc)
-  assert.equal(RAILTAKE.autoHideEnabled(), true, '默认开启自动隐藏')
+  assert.equal(RAILTAKE.autoHideEnabled(), true, '默认开启自动折叠')
+  assert.equal(rail.getAttribute('data-collapsed'), '0')
+  assert.ok(src.includes('transition:width .16s ease-out,opacity .16s ease-out'),
+    '宽度/透明度过渡要写在 rail 上，避免每帧重排整棵树')
 
   rail.dispatchEvent({ type: 'pointerleave' })
-  assert.equal(win.timers.some(timer => timer.delay === 1500), true, '离开后应挂 1.5s 定时器')
-  assert.equal(rail.getAttribute('data-autohide'), '0', '计时未到不立即收起')
+  assert.equal(win.timers.some(timer => timer.delay === 600), true, '离开后应挂 600ms 定时器')
+  assert.equal(rail.getAttribute('data-collapsed'), '0', '计时未到不立即收起')
   win.runTimers()
+  assert.equal(rail.getAttribute('data-collapsed'), '1', '自动收起必须是几何折叠，不只是变淡')
   assert.equal(rail.getAttribute('data-autohide'), '1')
-  assert.equal(rail.style.width, '16px', '自动隐藏也收成 16px')
-  assert.equal(store.getItem('dsh.tm.rail.autohide'), null, '自动隐藏不写折叠键')
+  assert.equal(rail.style.width, '16px', '自动折叠真实缩到 16px')
+  assert.equal(store.getItem('dsh.tm.rail.collapsed.s1'), null, '自动折叠不写手动折叠键')
 
   rail.dispatchEvent({ type: 'pointerenter' })
-  assert.equal(rail.getAttribute('data-autohide'), '0', '移入立即恢复')
-  assert.equal(rail.style.width, '200px')
+  assert.equal(rail.getAttribute('data-collapsed'), '0', '移入立即展开')
+  assert.equal(rail.getAttribute('data-autohide'), '0')
+  assert.equal(rail.style.width, '200px', '展开回当前档位')
   dispose()
 })
 
-await test('自动隐藏计时在移入时取消；设置关掉后不再收起', async () => {
+await test('自动折叠计时在移入时取消；设置关掉后不再收起', async () => {
   const scene = buildScene()
   const { RAILTAKE, dispose, win, store } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
   await flush()
@@ -758,14 +783,106 @@ await test('自动隐藏计时在移入时取消；设置关掉后不再收起',
   rail.dispatchEvent({ type: 'pointerleave' })
   rail.dispatchEvent({ type: 'pointerenter' })
   win.runTimers()
-  assert.equal(rail.getAttribute('data-autohide'), '0', '移入后旧的隐藏计时器必须取消')
+  assert.equal(rail.getAttribute('data-collapsed'), '0', '移入后旧的折叠计时器必须取消')
 
   RAILTAKE.setAutoHide(false)
   assert.equal(store.getItem('dsh.tm.rail.autohide'), '0', '设置关掉要写共享键')
   rail.dispatchEvent({ type: 'pointerleave' })
   win.runTimers()
-  assert.equal(rail.getAttribute('data-autohide'), '0', '关掉后离开不收起')
+  assert.equal(rail.getAttribute('data-collapsed'), '0', '关掉后离开不收起')
   assert.equal(rail.style.width, '200px')
+  dispose()
+})
+
+await test('手动折叠优先：自动折叠不会把手动收起的轨展开', async () => {
+  const scene = buildScene()
+  const { dispose, win, store } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  const rail = railOf(scene.doc)
+  const collapse = rail.querySelector('.dsh_tm_railcollapse')
+
+  collapse.dispatchEvent({ type: 'click' })
+  assert.equal(rail.getAttribute('data-collapsed'), '1')
+  assert.equal(store.getItem('dsh.tm.rail.collapsed.s1'), '1', '手动折叠按会话持久化')
+
+  rail.dispatchEvent({ type: 'pointerleave' })
+  win.runTimers()
+  rail.dispatchEvent({ type: 'pointerenter' })
+  assert.equal(rail.getAttribute('data-collapsed'), '1', '手动折叠时移入不能自动展开')
+  assert.equal(rail.style.width, '16px')
+
+  scene.doc.dispatch('keydown', { altKey: true, code: 'BracketLeft', key: '[' })
+  assert.equal(rail.getAttribute('data-collapsed'), '0', 'Alt+[ 是手动展开入口')
+  assert.equal(store.getItem('dsh.tm.rail.collapsed.s1'), '0')
+  dispose()
+})
+
+await test('滚动只更新 data-active：轨节点与行节点引用都不变', async () => {
+  const scene = buildScene()
+  const { RAILTAKE, dispose, win } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  const rail = railOf(scene.doc)
+  const before = rowButtons(scene.doc)
+  assert.equal(before.length, 3)
+
+  // 原生 aria-current 挪到第 3 轮，然后模拟滚动（宿主虚拟列表会更新 DOM）。
+  const nativeButtons = scene.nav.querySelectorAll('button[data-index]')
+  nativeButtons[1].removeAttribute('aria-current')
+  nativeButtons[2].setAttribute('aria-current', 'true')
+  scene.doc.dispatch('scroll')
+  win.runTimers()
+
+  assert.equal(railOf(scene.doc), rail, '滚动不能替换整条轨')
+  const after = rowButtons(scene.doc)
+  after.forEach((row, index) => assert.equal(row, before[index], '滚动不能重建行节点'))
+  assert.equal(after[2].getAttribute('data-active'), '1')
+  assert.equal(after[1].getAttribute('data-active'), '0')
+
+  for (let i = 0; i < 5; i += 1) RAILTAKE.sync()
+  assert.equal(railOf(scene.doc), rail, 'sync() 幂等：同 nav / 同行集合不重建')
+  rowButtons(scene.doc).forEach((row, index) => assert.equal(row, after[index]))
+
+  // syncNow 快路径不能再读 getComputedStyle / 重写几何，否则流式输出期间会持续布局抖动。
+  let styleReads = 0
+  const originalStyle = win.getComputedStyle.bind(win)
+  win.getComputedStyle = function () {
+    styleReads += 1
+    return originalStyle()
+  }
+  const rightBefore = rail.style.right
+  for (let i = 0; i < 5; i += 1) RAILTAKE.sync()
+  assert.equal(styleReads, 0, '幂等 sync 不应再读样式')
+  assert.equal(rail.style.right, rightBefore, '幂等 sync 不应重写定位')
+  dispose()
+})
+
+await test('结构 Mutation 才重建行；aria-current Mutation 只切属性', async () => {
+  const scene = buildScene()
+  const { dispose, win } = makeTakeover(scene.doc, {
+    loadOutline: () => Promise.resolve({ available: false, turns: [] }),
+  })
+  await flush()
+  const before = rowButtons(scene.doc)
+  assert.equal(before.length, 3)
+
+  // 只有 aria-current：不重建。
+  const nativeButtons = scene.nav.querySelectorAll('button[data-index]')
+  nativeButtons[0].removeAttribute('aria-current')
+  nativeButtons[1].setAttribute('aria-current', 'true')
+  win.fireMutation(scene.nav, [{ type: 'attributes', attributeName: 'aria-current' }])
+  win.runTimers()
+  rowButtons(scene.doc).forEach((row, index) => assert.equal(row, before[index], 'aria-current 不触发重建'))
+
+  // 原生按钮集合变化：新增第 4 轮，结构 Mutation 后补一行。
+  const button = scene.doc.createElement('button')
+  button.setAttribute('data-index', '3')
+  button.setAttribute('aria-label', '跳转到第 4 轮')
+  scene.nav.appendChild(button)
+  win.fireMutation(scene.nav, [{ type: 'childList', target: scene.nav, addedNodes: [button] }])
+  win.runTimers()
+  const after = rowButtons(scene.doc)
+  assert.equal(after.length, 4, '按钮集合变化后行集合要重建')
+  assert.equal(after[3].getAttribute('data-turn'), '4')
   dispose()
 })
 

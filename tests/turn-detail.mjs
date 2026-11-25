@@ -182,13 +182,13 @@ await test('详情字段完整（索引命中）', async () => {
   })
 })
 
-await test('详情透传 commands（schema 2）', async () => {
+await test('详情透传 commands（schema 3，含 run_code 解包）', async () => {
   await withTempHome(async () => {
     const events = makeEvents([{
       prompt: '跑测试',
       calls: [
         { name: 'run_code', args: { command: 'npm test' } },
-        { name: 'run_code', args: { code: 'console.log(1)' } },
+        { name: 'run_code', args: { code: 'await tools.ops_bash({ command: "npm run build" })' } },
       ],
     }])
     const ctx = makeCtx({ events: { 'sess-1': events } })
@@ -196,7 +196,7 @@ await test('详情透传 commands（schema 2）', async () => {
 
     const result = await readTurnDetail(ctx, { sessionId: 'sess-1', turn: 0 })
     assert.equal(result.ok, true)
-    assert.deepEqual(result.value.turn.commands, ['npm test', 'console.log(1)'])
+    assert.deepEqual(result.value.turn.commands, ['npm test', 'npm run build'])
   })
 })
 

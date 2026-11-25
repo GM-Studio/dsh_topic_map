@@ -222,14 +222,14 @@ await test('轮次行字段完整、类型正确', () => {
   assert.equal(row.steps, 2)
 })
 
-await test('命令抽取：按 command→cmd→script→code→args.command→args.cmd 兜底', () => {
+await test('命令抽取：command→cmd→script→args.command→args.cmd 优先', () => {
   const [row] = buildTurnRows(makeEvents([{
     prompt: '跑命令',
     calls: [
       { name: 'run_code', args: { command: 'echo one' } },
       { name: 'custom_tool', args: { cmd: 'echo two' } },
       { name: 'anything', args: { script: 'echo three' } },
-      { name: 'anything', args: { code: 'console.log(4)' } },
+      { name: 'anything', args: { code: 'console.log(4)' } }, // code 要解包，整段 JS 不算命令
       { name: 'anything', args: { args: { command: 'echo five' } } },
       { name: 'anything', args: { args: { cmd: 'echo six' } } },
       { name: 'anything', args: { command: 'first-wins', cmd: 'second' } },
@@ -241,13 +241,61 @@ await test('命令抽取：按 command→cmd→script→code→args.command→ar
     'echo one',
     'echo two',
     'echo three',
-    'console.log(4)',
     'echo five',
     'echo six',
     'first-wins',
     'cmd-wins',
   ])
   assert.deepEqual(row.tools, ['run_code', 'custom_tool', 'anything'])
+})
+
+await test('run_code 解包：双引号/单引号/JSON 键/转义换行', () => {
+  const doubleQuoted = 'const r = await tools.ops_bash({\n  command: "pwd; echo \'---\'; where dsh",\n  description: "x",\n});'
+  const singleQuoted = "await tools.ops_bash({ cmd: 'ls -la' })"
+  const jsonKey = 'const p = { "command": "git status --short" };'
+  const escapedNewline = 'await tools.ops_bash({ command: "echo a\\necho b" })'
+
+  const [row] = buildTurnRows(makeEvents([{
+    prompt: '解包',
+    calls: [
+      { name: 'run_code', args: { code: doubleQuoted } },
+      { name: 'run_code', args: { code: singleQuoted } },
+      { name: 'run_code', args: { code: jsonKey } },
+      { name: 'run_code', args: { code: escapedNewline } },
+    ],
+  }]))
+  assert.deepEqual(row.commands, [
+    "pwd; echo '---'; where dsh",
+    'ls -la',
+    'git status --short',
+    'echo a\necho b',
+  ])
+  assert.ok(row.commands[3].includes('\n'), '转义换行应还原成真实换行')
+})
+
+await test('run_code 解包失败：不回退成整段 JS', () => {
+  const [row] = buildTurnRows(makeEvents([{
+    prompt: '解包失败',
+    calls: [
+      { name: 'run_code', args: { code: 'const x = 1;\nconsole.log(x);' } },
+      { name: 'run_code', args: { code: 'await tools.ops_bash({ command: cmd })' } },
+      { name: 'run_code', args: { code: 'await tools.ops_bash({ command: "unterminated })' } },
+    ],
+  }]))
+  assert.deepEqual(row.commands, [])
+})
+
+await test('shell 类工具：code/script 直接当命令，不走 JS 解包', () => {
+  const [row] = buildTurnRows(makeEvents([{
+    prompt: 'shell 工具',
+    calls: [
+      { name: 'bash', args: { code: 'echo from bash' } },
+      { name: 'powershell', args: { code: 'Get-ChildItem' } },
+      { name: 'terminal', args: { script: 'ls -a' } },
+      { name: 'run_shell', args: { code: 'echo via run_shell' } },
+    ],
+  }]))
+  assert.deepEqual(row.commands, ['echo from bash', 'Get-ChildItem', 'ls -a', 'echo via run_shell'])
 })
 
 await test('命令去重、上限 8、单条 500 字符截断且无省略号', () => {
@@ -426,7 +474,7 @@ await test('revision 数字入参按字符串比较', async () => {
   })
 })
 
-await test('schema 1 旧索引判定过期并整体重建，补出 commands', async () => {
+await test('schema 2 旧索引判定过期并整体重建到 schema 3', async () => {
   await withTempDir(async dir => {
     const events = makeEvents([{
       prompt: '旧索引',
@@ -439,10 +487,10 @@ await test('schema 1 旧索引判定过期并整体重建，补出 commands', as
       loadEvents: async () => events,
     })
 
-    // 手工退回 schema 1：改 meta、删掉行里的 commands，模拟老版本产物。
+    // 手工退回 schema 2：改 meta、删掉行里的 commands，模拟上一版产物。
     const lines = (await readFile(first.path, 'utf8')).trimEnd().split('\n')
     const meta = JSON.parse(lines[0])
-    meta.schema = 1
+    meta.schema = 2
     const rows = lines.slice(1).map(line => {
       const row = JSON.parse(line)
       delete row.commands
@@ -450,7 +498,7 @@ await test('schema 1 旧索引判定过期并整体重建，补出 commands', as
     })
     await writeFile(first.path, [JSON.stringify(meta), ...rows].join('\n') + '\n', 'utf8')
 
-    assert.equal(await readIndexMeta(dir, 'sess-schema'), null, 'schema 1 不该被当成可用索引')
+    assert.equal(await readIndexMeta(dir, 'sess-schema'), null, 'schema 2 不该被当成可用索引')
     const stale = await readIndexFile(dir, 'sess-schema')
     assert.equal(stale.ok, false)
     assert.equal(stale.reason, 'meta')
@@ -465,12 +513,12 @@ await test('schema 1 旧索引判定过期并整体重建，补出 commands', as
         return events
       },
     })
-    assert.equal(second.skipped, false, 'schema 1 必须触发重建')
+    assert.equal(second.skipped, false, 'schema 2 必须触发重建')
     assert.equal(second.reason, 'meta')
     assert.equal(loads, 1)
     const parsed = parseIndexText(await readFile(second.path, 'utf8'))
     assert.equal(parsed.meta.schema, INDEX_SCHEMA)
-    assert.equal(parsed.meta.schema, 2)
+    assert.equal(parsed.meta.schema, 3)
     assert.deepEqual(parsed.turns[0].commands, ['echo hi'])
   })
 })

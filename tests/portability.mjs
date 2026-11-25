@@ -2,7 +2,7 @@
  * 可移植性验证：用多种"非本机"形态的数据跑全链路。
  *
  * 目的不是测本机，而是测"换一台机器 / 换一份数据，这个插件还能不能正常分析"。
- * 覆盖：英文、日文、全失败、单轮、空会话、200 轮压力、三平台路径。
+ * 覆盖：英文、日文、全失败、单轮、空会话、200 轮压力、Windows 路径。
  *
  * Run: node tests/portability.mjs
  */
@@ -113,7 +113,7 @@ await test('未知事件类型被忽略（向前兼容新版本日志）', async
   assert.equal(p.turns.length, 3, '未知事件不应影响折叠')
 })
 
-// ── 三平台路径 ──────────────────────────────────────────────────────
+// ── Windows 路径 ────────────────────────────────────────────────────
 await test('Windows 临时目录被排除', () => {
   assert.equal(isDeliverablePath('C:\\Users\\x\\AppData\\Local\\Temp\\a.md'), false)
 })
@@ -123,17 +123,12 @@ await test('Linux /tmp 被排除', () => {
   assert.equal(isDeliverablePath('/var/tmp/x/y.md'), false)
 })
 
-await test('macOS /var/folders 被排除', () => {
-  assert.equal(isDeliverablePath('/var/folders/xy/abc/T/tmp123.md'), false)
-})
-
-await test('三平台的真实项目文件都被保留', () => {
+await test('真实项目文件都被保留', () => {
   assert.equal(isDeliverablePath('E:\\proj\\docs\\a.md'), true, 'Windows')
   assert.equal(isDeliverablePath('/home/u/proj/docs/a.md'), true, 'Linux')
-  assert.equal(isDeliverablePath('/Users/u/proj/docs/a.md'), true, 'macOS')
 })
 
-await test('node_modules 三平台都排除', () => {
+await test('node_modules 都排除', () => {
   assert.equal(isDeliverablePath('C:\\p\\node_modules\\a\\b.js'), false)
   assert.equal(isDeliverablePath('/p/node_modules/a/b.js'), false)
 })

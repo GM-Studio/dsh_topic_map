@@ -11,11 +11,13 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildSessionIndexes, inject, syncSessionIndexFor } from '../lib/index.js'
 import {
+  INDEX_SCHEMA,
   defaultSessionsDir,
   parseIndexText,
   readIndexFile,
@@ -36,6 +38,11 @@ async function test(name, fn) {
 }
 
 const BASE_TIME = 1_700_000_000_000
+const BIG_FILE_BYTES = 2 * 1024 * 1024 + 1
+
+function sha256Of(value) {
+  return createHash('sha256').update(value).digest('hex')
+}
 
 /** 造事件流；spec.changes === true 时在轮内插一条 workspace/changes 指针。 */
 function makeEvents(specs) {
@@ -244,8 +251,8 @@ await test('summary 可用：只给有 workspace/changes 的轮次写 changes', 
     assert.equal(changed.has, true)
     assert.deepEqual(changed.row.changes, {
       files: [
-        { path: 'lib/client.js', added: 40, deleted: 5 },
-        { path: 'lib/index.js', added: 3, deleted: 0 },
+        { path: 'lib/client.js', added: 40, deleted: 5, hash: null, hashSkipped: 'missing' },
+        { path: 'lib/index.js', added: 3, deleted: 0, hash: null, hashSkipped: 'missing' },
       ],
       total: 2,
       added: 43,
@@ -255,6 +262,117 @@ await test('summary 可用：只给有 workspace/changes 的轮次写 changes', 
 
     const untouched = await changesOfTurn(result.path, 0)
     assert.equal(untouched.has, false, '没有变更事件的轮次不该写 changes')
+  })
+})
+
+await test('hash：成功 / missing / too-large / unreadable 四种形状', async () => {
+  await withTempDir(async dir => {
+    const workspace = join(dir, 'workspace')
+    await mkdir(workspace, { recursive: true })
+    const okText = 'export const value = 1\n'
+    await writeFile(join(workspace, 'ok.js'), okText, 'utf8')
+    await writeFile(join(workspace, 'big.bin'), Buffer.alloc(BIG_FILE_BYTES))
+    await mkdir(join(workspace, 'folder'))
+
+    const events = makeEvents([{ prompt: '改文件', changes: true }])
+    const summary = {
+      cwd: workspace,
+      files: [
+        { path: 'ok.js', added: 1, deleted: 0 },
+        { path: 'missing.js', added: 1, deleted: 0 },
+        { path: 'big.bin', added: 1, deleted: 0 },
+        { path: 'folder', added: 1, deleted: 0 },
+      ],
+      total: 4,
+      added: 4,
+      deleted: 0,
+    }
+    const { ctx } = makeHostCtx({ events, summary: async () => summary })
+    const result = await syncSessionIndexFor(ctx, 'sess-hash', { dir })
+    const changed = await changesOfTurn(result.path, 0)
+    assert.deepEqual(changed.row.changes.files, [
+      { path: 'ok.js', added: 1, deleted: 0, hash: sha256Of(okText) },
+      { path: 'missing.js', added: 1, deleted: 0, hash: null, hashSkipped: 'missing' },
+      { path: 'big.bin', added: 1, deleted: 0, hash: null, hashSkipped: 'too-large' },
+      { path: 'folder', added: 1, deleted: 0, hash: null, hashSkipped: 'unreadable' },
+    ])
+    assert.equal(changed.row.changes.lost, false)
+  })
+})
+
+await test('hash 限流：前 50 个文件计算，第 51 个起 limited', async () => {
+  await withTempDir(async dir => {
+    const workspace = join(dir, 'workspace')
+    await mkdir(workspace, { recursive: true })
+    const files = []
+    for (let index = 0; index < 51; index += 1) {
+      const name = `f${index}.js`
+      files.push({ path: name, added: 1, deleted: 0 })
+      if (index < 50) await writeFile(join(workspace, name), `file ${index}\n`, 'utf8')
+    }
+    const events = makeEvents([{ prompt: '批量改文件', changes: true }])
+    const { ctx } = makeHostCtx({
+      events,
+      summary: async () => ({ cwd: workspace, files, total: files.length, added: 51, deleted: 0 }),
+    })
+    const result = await syncSessionIndexFor(ctx, 'sess-hash-limit', { dir })
+    const changed = await changesOfTurn(result.path, 0)
+    assert.equal(changed.row.changes.files.length, 51)
+    for (let index = 0; index < 50; index += 1) {
+      const file = changed.row.changes.files[index]
+      assert.equal(file.hash, sha256Of(`file ${index}\n`), `第 ${index + 1} 个文件应有 hash`)
+      assert.equal(file.hashSkipped, undefined)
+    }
+    assert.deepEqual(changed.row.changes.files[50], {
+      path: 'f50.js',
+      added: 1,
+      deleted: 0,
+      hash: null,
+      hashSkipped: 'limited',
+    })
+  })
+})
+
+await test('legacy 重建：schema 4 历史轮次 hash:null，不拿当前磁盘冒充旧快照', async () => {
+  await withTempDir(async dir => {
+    const workspace = join(dir, 'workspace')
+    await mkdir(workspace, { recursive: true })
+    const current = 'current content after later edits\n'
+    await writeFile(join(workspace, 'target.js'), current, 'utf8')
+    const events = makeEvents([{ prompt: '历史变更', changes: true }])
+
+    // 先造一份 schema 5 索引，再手工退回 schema 4，模拟升级前的旧索引。
+    const first = await syncSessionIndex({
+      dir,
+      sessionId: 'sess-legacy',
+      revision: 'rev-1',
+      loadEvents: async () => events,
+    })
+    const lines = (await readFile(first.path, 'utf8')).trimEnd().split('\n')
+    const meta = JSON.parse(lines[0])
+    meta.schema = 4
+    await writeFile(first.path, [JSON.stringify(meta), ...lines.slice(1)].join('\n') + '\n', 'utf8')
+
+    const { ctx } = makeHostCtx({
+      events,
+      summary: async () => ({
+        cwd: workspace,
+        files: [{ path: 'target.js', added: 1, deleted: 0 }],
+        total: 1,
+        added: 1,
+        deleted: 0,
+      }),
+    })
+    const rebuilt = await syncSessionIndexFor(ctx, 'sess-legacy', { dir, revision: 'rev-1' })
+    assert.equal(rebuilt.reason, 'meta')
+    const parsed = parseIndexText(await readFile(rebuilt.path, 'utf8'))
+    assert.equal(parsed.meta.schema, INDEX_SCHEMA)
+    assert.equal(parsed.meta.schema, 5)
+    const changed = parsed.turns[0]
+    assert.deepEqual(changed.changes.files, [
+      { path: 'target.js', added: 1, deleted: 0, hash: null },
+    ])
+    assert.equal(changed.changes.files[0].hashSkipped, undefined, '历史轮次不应标记为可重试的跳过原因')
   })
 })
 
@@ -378,7 +496,9 @@ await test('同一轮重建复用已落盘的 changes，不重复请求 summary'
 
     const changed = await changesOfTurn(second.path, 0)
     assert.equal(changed.row.changes.lost, false)
-    assert.deepEqual(changed.row.changes.files, [{ path: 'lib/client.js', added: 1, deleted: 2 }])
+    assert.deepEqual(changed.row.changes.files, [
+      { path: 'lib/client.js', added: 1, deleted: 2, hash: null, hashSkipped: 'missing' },
+    ])
     assert.ok(first.path === second.path)
   })
 })
@@ -406,7 +526,9 @@ await test('lost:true 不缓存，下一次重建会重试 summary', async () =>
     assert.equal(calls, 2, 'lost 的轮次应重试 summary')
     const changed = await changesOfTurn(second.path, 0)
     assert.equal(changed.row.changes.lost, false)
-    assert.deepEqual(changed.row.changes.files, [{ path: 'lib/index.js', added: 7, deleted: 1 }])
+    assert.deepEqual(changed.row.changes.files, [
+      { path: 'lib/index.js', added: 7, deleted: 1, hash: null, hashSkipped: 'missing' },
+    ])
   })
 })
 

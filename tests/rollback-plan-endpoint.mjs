@@ -13,8 +13,8 @@ import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildRollbackPlan } from '../lib/index.js'
-import { serializeIndex } from '../lib/turn-index.js'
+import { buildRollbackPlan, syncSessionIndexFor } from '../lib/index.js'
+import { readIndexFile, serializeIndex } from '../lib/turn-index.js'
 
 let passed = 0
 const failures = []
@@ -79,6 +79,15 @@ async function seedIndex(home, rows) {
   await mkdir(dir, { recursive: true })
   await writeFile(join(dir, `${SESSION}.jsonl`), indexText(rows), 'utf8')
   return join(dir, `${SESSION}.jsonl`)
+}
+
+/** 一条含 workspace/changes 指针的最小事件流。 */
+function changeEvents() {
+  return [
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } },
+    { type: 'workspace/changes', seq: 1, time: 2, data: { turn: 0 } },
+    { type: 'turn/end', seq: 2, time: 3, data: { turn: 0, reason: { kind: 'completed' } } },
+  ]
 }
 
 console.log('\nrollback-plan-endpoint')
@@ -204,6 +213,42 @@ await test('lost / 无 changes：空计划 + 明确文案', async () => {
 
     const none = await buildRollbackPlan(makeCtx(root), { sessionId: SESSION, turn: 1 })
     assert.deepEqual(none.value, { plan: [], summary: '该轮没有变更记录' })
+  })
+})
+
+await test('端到端：F-7 落 hash → 改磁盘文件 → /rollback-plan 判 modified', async () => {
+  await withTemp(async ({ home, root }) => {
+    const original = 'first version\n'
+    const target = join(root, 'target.js')
+    await writeFile(target, original, 'utf8')
+    const indexDir = join(home, 'topic-map', 'index', 'sessions')
+    const ctx = makeCtx(root)
+    ctx.workspaceChanges = {
+      summary: async () => ({
+        cwd: root,
+        files: [{ path: 'target.js', added: 2, deleted: 0 }],
+        total: 1,
+        added: 2,
+        deleted: 0,
+      }),
+    }
+
+    await syncSessionIndexFor(ctx, SESSION, {
+      dir: indexDir,
+      revision: 'rev-1',
+      events: changeEvents(),
+    })
+    const built = await readIndexFile(indexDir, SESSION)
+    assert.equal(built.ok, true)
+    assert.equal(built.turns[0].changes.files[0].hash, sha256(original), 'F-7 应记录变更后文件的 sha256')
+
+    await writeFile(target, 'second version\n', 'utf8')
+    const result = await buildRollbackPlan(ctx, { sessionId: SESSION, turn: 0 })
+    assert.equal(result.ok, true, result.error)
+    assert.equal(result.value.plan[0].state, 'modified')
+    assert.equal(result.value.plan[0].hash, sha256(original))
+    assert.equal(result.value.plan[0].currentHash, sha256('second version\n'))
+    assert.equal(result.value.plan[0].reason, '文件在变更后已被修改，需人工确认')
   })
 })
 

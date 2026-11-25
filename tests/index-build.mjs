@@ -154,15 +154,15 @@ await test('readIndexMeta 只读首行：坏轮次行不影响，缺失/坏 meta
     assert.equal(await readIndexMeta(dir, 'missing'), null)
 
     const path = indexFilePath(dir, 'meta-ok')
-    await writeFile(path, '{"kind":"meta","schema":4,"revision":"rev-7","turnCount":2}\nnot-json\n', 'utf8')
+    await writeFile(path, '{"kind":"meta","schema":5,"revision":"rev-7","turnCount":2}\nnot-json\n', 'utf8')
     assert.deepEqual(await readIndexMeta(dir, 'meta-ok'), {
       kind: 'meta',
-      schema: 4,
+      schema: 5,
       revision: 'rev-7',
       turnCount: 2,
     })
 
-    await writeFile(path, '{"kind":"meta","schema":4,"revision":"rev-8","turnCount":0}\n', 'utf8')
+    await writeFile(path, '{"kind":"meta","schema":5,"revision":"rev-8","turnCount":0}\n', 'utf8')
     assert.equal((await readIndexMeta(dir, 'meta-ok')).revision, 'rev-8')
 
     await writeFile(path, 'garbage\n', 'utf8')

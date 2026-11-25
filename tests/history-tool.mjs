@@ -264,7 +264,9 @@ await test('handle 唯一匹配：取回该轮摘要与命令/文件/变更', as
     assert.equal(result.endReason, 'completed')
     assert.deepEqual(result.commands, ['npm run build', 'npm test'])
     assert.deepEqual(result.files, ['lib/client.js'])
-    assert.deepEqual(result.changes.files, [{ path: 'lib/client.js', added: 3, deleted: 1 }])
+    assert.deepEqual(result.changes.files, [
+      { path: 'lib/client.js', added: 3, deleted: 1, hash: null, hashSkipped: 'missing' },
+    ])
     assert.equal(result.changes.lost, false)
     assert.equal(result.truncated, true, '摘要档应提示还有原文')
     assert.deepEqual(result.neighbors, [

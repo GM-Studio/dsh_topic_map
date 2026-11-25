@@ -488,7 +488,7 @@ await test('revision 数字入参按字符串比较', async () => {
   })
 })
 
-await test('schema 3 旧索引判定过期并整体重建到 schema 4', async () => {
+await test('schema 4 旧索引判定过期并整体重建到 schema 5', async () => {
   await withTempDir(async dir => {
     const events = makeEvents([{
       prompt: '旧索引',
@@ -501,18 +501,13 @@ await test('schema 3 旧索引判定过期并整体重建到 schema 4', async ()
       loadEvents: async () => events,
     })
 
-    // 手工退回 schema 3：改 meta、删掉行里的 endSeq，模拟上一版产物。
+    // 手工退回 schema 4：只改 meta，模拟 F-7 hash 之前的产物。
     const lines = (await readFile(first.path, 'utf8')).trimEnd().split('\n')
     const meta = JSON.parse(lines[0])
-    meta.schema = 3
-    const rows = lines.slice(1).map(line => {
-      const row = JSON.parse(line)
-      delete row.endSeq
-      return JSON.stringify(row)
-    })
-    await writeFile(first.path, [JSON.stringify(meta), ...rows].join('\n') + '\n', 'utf8')
+    meta.schema = 4
+    await writeFile(first.path, [JSON.stringify(meta), ...lines.slice(1)].join('\n') + '\n', 'utf8')
 
-    assert.equal(await readIndexMeta(dir, 'sess-schema'), null, 'schema 3 不该被当成可用索引')
+    assert.equal(await readIndexMeta(dir, 'sess-schema'), null, 'schema 4 不该被当成可用索引')
     const stale = await readIndexFile(dir, 'sess-schema')
     assert.equal(stale.ok, false)
     assert.equal(stale.reason, 'meta')
@@ -527,12 +522,12 @@ await test('schema 3 旧索引判定过期并整体重建到 schema 4', async ()
         return events
       },
     })
-    assert.equal(second.skipped, false, 'schema 3 必须触发重建')
+    assert.equal(second.skipped, false, 'schema 4 必须触发重建')
     assert.equal(second.reason, 'meta')
     assert.equal(loads, 1)
     const parsed = parseIndexText(await readFile(second.path, 'utf8'))
     assert.equal(parsed.meta.schema, INDEX_SCHEMA)
-    assert.equal(parsed.meta.schema, 4)
+    assert.equal(parsed.meta.schema, 5)
     assert.deepEqual(parsed.turns[0].commands, ['echo hi'])
     assert.equal(Number.isInteger(parsed.turns[0].endSeq), true)
   })

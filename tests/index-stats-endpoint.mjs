@@ -48,7 +48,7 @@ function makeCtx(workspaces = [{
 function indexText(turnCount, revision = 'rev-1') {
   const meta = JSON.stringify({
     kind: 'meta',
-    schema: 4,
+    schema: 5,
     revision,
     turnCount,
   })

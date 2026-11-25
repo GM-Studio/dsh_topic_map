@@ -74,6 +74,9 @@ schema < 3 的索引一律判过期：消费端先走日志兜底（结果立刻
 - **补齐索引**：检索命中未建索引的会话时逐个入队（并发 2、在途去重、60 秒节流）；
   `POST /workspace-reindex {workspaceId}` 一键排空整工区，**不受节流**，立即返回 `queued`。
 - **会话代码块**：`POST /session-commands {sessionId, offset?, limit?, q?, lang?}` → `{total,offset,limit,hasMore,commands[{seq,turn,lang,text}]}`。
+  解析器在 **`lib/code-blocks.js`**（`codeBlocksOf(response)`），**`/search` 的命中计数也用它**——
+  同一轮 response 的代码块数即 `hit.blockCount`（`commandCount` 保留为同值别名），分组计数为组内合计。
+  两边共用一套解析，避免"徽标数字与浮窗内容对不上"。
   **只取 assistant 回答里的 markdown 围栏代码块**（工具执行命令不算——那是动作，不是对话内容）；
   一条 = 一个代码块，`text` 保留换行不截断，所有语言都收，`lang` 为围栏标注（无标注 `''`）；
   `q` 子串、`lang` 支持 `'*'`（全部）/ `'shell'`（bash/sh/zsh/powershell/ps1/bat/cmd/console 语言组）/

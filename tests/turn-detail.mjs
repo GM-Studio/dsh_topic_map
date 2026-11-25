@@ -18,7 +18,7 @@ import {
   setWorkspaceLabel,
   syncSessionIndexFor,
 } from '../lib/index.js'
-import { defaultSessionsDir, indexFilePath } from '../lib/turn-index.js'
+import { defaultSessionsDir, indexFilePath, parseIndexText, serializeIndex } from '../lib/turn-index.js'
 
 let passed = 0
 const failures = []
@@ -65,6 +65,9 @@ function makeEvents(specs) {
       usage: spec.usage,
       interrupted: spec.interrupted === true,
     }, start + 1000)
+    if (spec.changes === true) {
+      push('workspace/changes', { turn }, start + 2000)
+    }
     push('turn/end', { turn, reason: { kind: spec.endReason ?? 'completed' } }, start + 5000)
   })
   return events
@@ -74,7 +77,7 @@ function makeEvents(specs) {
 function makeCtx(options = {}) {
   const events = options.events ?? {}
   const revisions = options.revisions ?? {}
-  return {
+  const ctx = {
     get(name) {
       if (name !== 'workspaceRegistry') return undefined
       return {
@@ -99,6 +102,10 @@ function makeCtx(options = {}) {
       },
     },
   }
+  if (typeof options.summary === 'function') {
+    ctx.workspaceChanges = { summary: options.summary }
+  }
+  return ctx
 }
 
 async function withTempHome(fn) {
@@ -115,12 +122,28 @@ async function withTempHome(fn) {
   }
 }
 
+/** 就地改索引行后重写（保持 meta.revision 与合法 schema）。 */
+async function rewriteIndex(path, mutate) {
+  const parsed = parseIndexText(await readFile(path, 'utf8'))
+  assert.equal(parsed.ok, true, `索引不可解析：${parsed.reason}`)
+  mutate(parsed.turns)
+  await writeFile(path, serializeIndex({ revision: parsed.meta.revision, turns: parsed.turns }), 'utf8')
+}
+
 const USAGE = {
   inputTokens: 120,
   outputTokens: 30,
   cacheReadTokens: 10,
   cacheWriteTokens: 5,
   reasoningTokens: 2,
+}
+
+const LOST_CHANGES = {
+  files: [],
+  total: 0,
+  added: 0,
+  deleted: 0,
+  lost: true,
 }
 
 console.log('\nturn-detail')
@@ -262,6 +285,7 @@ await test('索引缺失时用日志全文兜底（不走 160 字预览）', asy
     assert.equal(result.ok, true, result.error)
     assert.equal(result.value.turn.response, longResponse, '兜底路径用了预览而不是全文')
     assert.ok(result.value.turn.response.length > 160)
+    assert.equal(result.value.turn.changes, null, '索引缺失时 changes 只能是 null')
     assert.deepEqual(result.value.neighbors.map(item => item.turn), [0, 2])
   })
 })
@@ -278,6 +302,98 @@ await test('索引损坏时也退回日志兜底', async () => {
     assert.equal(result.ok, true, result.error)
     assert.equal(result.value.turn.turn, 1)
     assert.equal(result.value.turn.prompt, '乙')
+    assert.equal(result.value.turn.changes, null, '索引损坏时不能合并 changes')
+  })
+})
+
+await test('revision 不一致：日志兜底仍合并索引 changes（lost:true 也返回）', async () => {
+  await withTempHome(async () => {
+    const events = makeEvents([
+      { prompt: '第一轮' },
+      { prompt: '第二轮', response: '日志里的回答', changes: true },
+    ])
+    const revisions = { 'sess-1': 'rev-1' }
+    const ctx = makeCtx({
+      events: { 'sess-1': events },
+      revisions,
+      summary: async () => undefined,
+    })
+    const built = await syncSessionIndexFor(ctx, 'sess-1')
+    assert.equal(built.skipped, false)
+    assert.deepEqual(
+      (await readFile(built.path, 'utf8')).includes('"lost":true'),
+      true,
+      '索引应先落 lost:true',
+    )
+
+    // 活会话：日志走远之后 revision 不再匹配，详情走日志兜底。
+    revisions['sess-1'] = 'rev-2'
+    const result = await readTurnDetail(ctx, { sessionId: 'sess-1', turn: 1 })
+    assert.equal(result.ok, true, result.error)
+    assert.equal(result.value.turn.prompt, '第二轮', '正文仍以日志为准')
+    assert.equal(result.value.turn.response, '日志里的回答')
+    assert.deepEqual(result.value.turn.changes, LOST_CHANGES, '兜底路径不能丢掉 changes')
+  })
+})
+
+await test('revision 不一致：正常 changes 的 files 也按 turn 合并回来', async () => {
+  await withTempHome(async () => {
+    const events = makeEvents([{ prompt: '改过文件', changes: true }])
+    const revisions = { 'sess-1': 'rev-1' }
+    const ctx = makeCtx({
+      events: { 'sess-1': events },
+      revisions,
+      summary: async () => ({
+        cwd: 'E:\\ws',
+        files: [{ path: 'lib/client.js', added: 3, deleted: 1 }],
+        total: 1,
+        added: 3,
+        deleted: 1,
+      }),
+    })
+    await syncSessionIndexFor(ctx, 'sess-1')
+    revisions['sess-1'] = 'rev-2'
+
+    const result = await readTurnDetail(ctx, { sessionId: 'sess-1', turn: 0 })
+    assert.equal(result.ok, true, result.error)
+    assert.equal(result.value.turn.changes.lost, false)
+    assert.deepEqual(result.value.turn.changes.files, [
+      { path: 'lib/client.js', added: 3, deleted: 1, hash: null, hashSkipped: 'missing' },
+    ])
+  })
+})
+
+await test('endSeq 不一致时不合并（不把别的内容贴错轮）', async () => {
+  await withTempHome(async () => {
+    const events = makeEvents([{ prompt: '索引轮', changes: true }])
+    const revisions = { 'sess-1': 'rev-1' }
+    const ctx = makeCtx({ events: { 'sess-1': events }, revisions, summary: async () => undefined })
+    const built = await syncSessionIndexFor(ctx, 'sess-1')
+    await rewriteIndex(built.path, rows => {
+      rows[0].endSeq = 99999
+    })
+    revisions['sess-1'] = 'rev-2'
+
+    const result = await readTurnDetail(ctx, { sessionId: 'sess-1', turn: 0 })
+    assert.equal(result.ok, true, result.error)
+    assert.equal(result.value.turn.changes, null, 'endSeq 不一致必须放弃合并')
+  })
+})
+
+await test('索引行 endSeq 为 null 时退化为按 turn 号合并', async () => {
+  await withTempHome(async () => {
+    const events = makeEvents([{ prompt: '未终结索引', changes: true }])
+    const revisions = { 'sess-1': 'rev-1' }
+    const ctx = makeCtx({ events: { 'sess-1': events }, revisions, summary: async () => undefined })
+    const built = await syncSessionIndexFor(ctx, 'sess-1')
+    await rewriteIndex(built.path, rows => {
+      rows[0].endSeq = null
+    })
+    revisions['sess-1'] = 'rev-2'
+
+    const result = await readTurnDetail(ctx, { sessionId: 'sess-1', turn: 0 })
+    assert.equal(result.ok, true, result.error)
+    assert.deepEqual(result.value.turn.changes, LOST_CHANGES, 'endSeq 缺失时按 turn 号退化合并')
   })
 })
 

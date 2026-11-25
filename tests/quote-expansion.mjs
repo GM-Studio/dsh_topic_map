@@ -1,10 +1,9 @@
 /**
- * 引用自动展开测试（wire 层全、显示层短）。
+ * 引用自动展开测试（显示指针、wire 摘要）。
  *
- * 结论：`AssembleContext` 运行时带 `agent`（`assembleContextFor` 传
- * `{agent, scope: agent}`），但 `PromptContext.text` 只能同步返回；历史
- * 会话全文要异步读索引/日志。因此自动展开挂在异步的
- * `system-prompt/assemble` waterfall 上，追加一个同名 context。
+ * 引用只有摘要档：`〔xxxxxxxx#N〕`。自动展开挂在异步
+ * `system-prompt/assemble` waterfall 上，注入 `topic-map:引用展开`：
+ * 有摘要缓存用缓存，没有就现算；失败降级为回答前 400 字并标注。
  *
  * Run: node tests/quote-expansion.mjs
  */
@@ -39,8 +38,9 @@ const TARGET = 'session-4c42ff36-aaaa-4bbb-8ccc-000000000001'
 const TARGET_DEDUPE = 'session-4c42ff37-aaaa-4bbb-8ccc-000000000002'
 const TARGET_LOG = 'session-4c42ff38-aaaa-4bbb-8ccc-000000000003'
 const TARGET_MISS = 'session-4c42ff39-aaaa-4bbb-8ccc-000000000004'
-const TARGET_BUDGET = 'session-4c42ff3a-aaaa-4bbb-8ccc-000000000005'
+const TARGET_LIMIT = 'session-4c42ff3a-aaaa-4bbb-8ccc-000000000005'
 const TARGET_WIRE = 'session-4c42ff3b-aaaa-4bbb-8ccc-000000000006'
+const TARGET_FALLBACK = 'session-4c42ff3c-aaaa-4bbb-8ccc-000000000007'
 const OTHER = 'session-deadbeef-1111-4aaa-8bbb-000000000002'
 
 function makeEvents(specs) {
@@ -67,26 +67,45 @@ function makeEvents(specs) {
   return events
 }
 
+/** 假模型：记录调用次数；可 gate 卡住；可失败。 */
+function makeFakeLlm(options = {}) {
+  const state = { calls: 0 }
+  return {
+    get calls() {
+      return state.calls
+    },
+    async prepareCall(call) {
+      state.calls += 1
+      return {
+        config: { ...call, provider: 'fake', model: 'fake-1' },
+        async *stream() {
+          if (options.gate !== undefined) await options.gate.promise
+          if (options.fail === true) throw new Error('model down')
+          yield { type: 'text-delta', text: options.text ?? '摘要：跳转问题定位并修复。' }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        },
+      }
+    },
+    listProviders() {
+      return [{ id: 'fake' }]
+    },
+  }
+}
+
 function makeCtx(options = {}) {
   const events = options.events ?? {}
   const revisions = options.revisions ?? {}
+  const llm = options.llm === undefined ? makeFakeLlm(options.llmOptions) : options.llm
   const workspaces = options.workspaces ?? [{
     id: 'ws-1',
-    path: 'E:\\ws',
+    path: 'E:\\\\ws',
     title: '工作区 A',
     sessionIds: options.sessions ?? Object.keys(events),
   }]
-  return {
+  const ctx = {
     get(name) {
       if (name === 'workspaceRegistry') return { list: () => workspaces }
-      if (name === 'sessionQuery') {
-        return {
-          async readSession(id) {
-            if (typeof options.readSession === 'function') return options.readSession(id)
-            return { events: events[id] ?? [] }
-          },
-        }
-      }
+      if (name === 'llm') return llm
       return undefined
     },
     sessionQuery: {
@@ -101,7 +120,9 @@ function makeCtx(options = {}) {
         return { revision: revisions[id] ?? 'rev-1' }
       },
     },
+    llm,
   }
+  return ctx
 }
 
 /** 构造 Agent：deriveMessages 返回人写消息，snapshotEvents 给当前会话的日志。 */
@@ -115,7 +136,7 @@ function makeAgent(options = {}) {
   return {
     id: options.id ?? CALLER,
     session: {
-      header: { cwd: options.cwd ?? 'E:\\ws' },
+      header: { cwd: options.cwd ?? 'E:\\\\ws' },
       deriveMessages: () => messages,
       snapshotEvents: () => options.events ?? [],
     },
@@ -137,14 +158,14 @@ async function withTempHome(fn) {
 }
 
 function countBlocks(text) {
-  return (text.match(/〔引用展开 /g) ?? []).length
+  return (text.match(/〔引用摘要 /g) ?? []).length
 }
 
 console.log('\nquote-expansion')
 
-// ── async 展开主体 ──────────────────────────────────────────────────
+// ── 摘要档展开 ──────────────────────────────────────────────────────
 
-await test('历史会话：句柄展开成全文块（带提问/回答）', async () => {
+await test('历史会话：句柄展开成摘要块，不再注入全文', async () => {
   await withTempHome(async () => {
     const events = {
       [TARGET]: makeEvents([
@@ -152,20 +173,38 @@ await test('历史会话：句柄展开成全文块（带提问/回答）', asyn
         { prompt: '第二轮：把跳转修好', response: '定位逻辑改好了。' },
       ]),
     }
-    const ctx = makeCtx({ events })
+    const llm = makeFakeLlm({ text: '摘要：第二轮定位跳转问题并修复。' })
+    const ctx = makeCtx({ events, llm })
     await syncSessionIndexFor(ctx, TARGET)
-    const agent = makeAgent({ texts: [`继续看这个 〔4c42ff36#1〕 的结论`] })
+    const agent = makeAgent({ texts: ['继续看这个 〔4c42ff36#1〕 的结论'] })
 
     const text = await expandQuoteHandlesForAgent(ctx, agent)
-    assert.ok(text.includes('〔引用展开 4c42ff36#1〕'), text)
-    assert.ok(text.includes('第二轮：把跳转修好'))
-    assert.ok(text.includes('定位逻辑改好了。'))
-    assert.ok(text.includes('提问：'))
-    assert.ok(text.includes('回答：'))
+    assert.ok(text.includes('〔引用摘要 4c42ff36#1〕'), text)
+    assert.ok(text.includes('摘要：第二轮定位跳转问题并修复。'), text)
+    assert.equal(text.includes('第二轮：把跳转修好'), false, '不应把全文提问塞进去')
+    assert.equal(text.includes('定位逻辑改好了。'), false, '不应把全文回答塞进去')
     assert.equal(countBlocks(text), 1)
+    assert.equal(llm.calls, 1)
 
     const sample = text.slice(0, 160)
     console.log(`       样例（${text.length} 字，约 ${Math.ceil(text.length / 1.5)} tokens）：${sample.replace(/\n/g, ' / ')}…`)
+  })
+})
+
+await test('只认无后缀句柄：带 ·全文 的旧形态不展开', async () => {
+  await withTempHome(async () => {
+    const llm = makeFakeLlm()
+    const ctx = makeCtx({ events: { [TARGET]: makeEvents([{ prompt: '甲' }]) }, llm })
+    await syncSessionIndexFor(ctx, TARGET)
+
+    assert.equal(await expandQuoteHandlesForAgent(ctx, makeAgent({ texts: ['〔4c42ff36#0·全文〕'] })), '')
+    assert.equal(llm.calls, 0, '后缀句柄不该触发模型调用')
+
+    const mixed = await expandQuoteHandlesForAgent(
+      ctx,
+      makeAgent({ texts: ['旧写法 〔4c42ff36#0·全文〕，新写法 〔4c42ff36#0〕'] }),
+    )
+    assert.equal(countBlocks(mixed), 1, '同一轮只展开一次')
   })
 })
 
@@ -200,7 +239,7 @@ await test('同一句柄去重；多个句柄按出现顺序展开', async () =>
   })
 })
 
-await test('当前会话：直接读内存日志，不依赖索引', async () => {
+await test('当前会话：直接读内存日志并生成摘要，不依赖索引', async () => {
   await withTempHome(async () => {
     const sameSessionEvents = makeEvents([{ prompt: '自己的问题', response: '自己的回答' }])
     const ctx = makeCtx({ events: { [CALLER]: sameSessionEvents } })
@@ -211,12 +250,12 @@ await test('当前会话：直接读内存日志，不依赖索引', async () =>
       events: sameSessionEvents,
     })
     const text = await expandQuoteHandlesForAgent(ctx, agent)
-    assert.ok(text.includes('自己的问题'), text)
-    assert.ok(text.includes('自己的回答'))
+    assert.ok(text.includes('〔引用摘要 9999aaaa#0〕'), text)
+    assert.ok(text.includes('摘要：'), text)
   })
 })
 
-await test('目标会话没有索引：退回日志全文', async () => {
+await test('目标会话没有索引：退回日志读取后再生成摘要', async () => {
   await withTempHome(async () => {
     const longResponse = `${'铺'.repeat(400)}兜底尾巴`
     const ctx = makeCtx({
@@ -224,8 +263,8 @@ await test('目标会话没有索引：退回日志全文', async () => {
     })
     const agent = makeAgent({ texts: ['〔4c42ff38#0〕'] })
     const text = await expandQuoteHandlesForAgent(ctx, agent)
-    assert.ok(text.includes('兜底尾巴'), '没有走日志兜底')
-    assert.ok(text.includes('铺铺铺'))
+    assert.ok(text.includes('摘要：'), text)
+    assert.equal(text.includes('铺铺铺'), false, '摘要档不应回退成全文')
   })
 })
 
@@ -262,8 +301,8 @@ await test('前缀无匹配 / 跨工作区不泄露', async () => {
       },
       sessions: [CALLER],
       workspaces: [
-        { id: 'ws-1', path: 'E:\\ws', title: '工作区 A', sessionIds: [CALLER] },
-        { id: 'ws-2', path: 'E:\\other', title: '工作区 B', sessionIds: [OTHER] },
+        { id: 'ws-1', path: 'E:\\\\ws', title: '工作区 A', sessionIds: [CALLER] },
+        { id: 'ws-2', path: 'E:\\\\other', title: '工作区 B', sessionIds: [OTHER] },
       ],
     })
     const agent = makeAgent({ texts: ['〔deadbeef#0〕'] })
@@ -273,42 +312,56 @@ await test('前缀无匹配 / 跨工作区不泄露', async () => {
   })
 })
 
-// ── 预算 ────────────────────────────────────────────────────────────
+await test('摘要生成失败：降级为回答前 400 字并标注，插入不受影响', async () => {
+  await withTempHome(async () => {
+    const answer = '答'.repeat(1000)
+    const ctx = makeCtx({
+      events: { [TARGET_FALLBACK]: makeEvents([{ prompt: '问题', response: answer }]) },
+      sessions: [TARGET_FALLBACK],
+      llm: makeFakeLlm({ fail: true }),
+    })
+    const text = await expandQuoteHandlesForAgent(ctx, makeAgent({ texts: ['〔4c42ff3c#0〕'] }))
+    assert.ok(text.includes('（摘要生成失败，以下是回答开头）'), text)
+    assert.ok(text.includes('答'.repeat(400)), `应保留回答前 400 字；实际：${JSON.stringify(text.slice(0, 800))}`)
+    assert.equal(text.includes('答'.repeat(401)), false, '不应超过 400 字')
+    assert.ok(text.startsWith('〔引用摘要 4c42ff3c#0〕'), text)
+  })
+})
 
-await test('单块 ≤4000 字、总预算 ≤12000 字、最多 3 个句柄', async () => {
+await test('摘要 ≤400 字、最多 3 个句柄', async () => {
   await withTempHome(async () => {
     const long = '答'.repeat(20000)
     const ctx = makeCtx({
       events: {
-        [TARGET_BUDGET]: makeEvents([
+        [TARGET_LIMIT]: makeEvents([
           { prompt: '一', response: long },
           { prompt: '二', response: long },
           { prompt: '三', response: long },
           { prompt: '四', response: long },
         ]),
       },
-      sessions: [TARGET_BUDGET],
+      sessions: [TARGET_LIMIT],
+      llmOptions: { text: '要'.repeat(600) },
     })
-    await syncSessionIndexFor(ctx, TARGET_BUDGET)
+    await syncSessionIndexFor(ctx, TARGET_LIMIT)
     const agent = makeAgent({
       texts: ['〔4c42ff3a#0〕 〔4c42ff3a#1〕 〔4c42ff3a#2〕 〔4c42ff3a#3〕'],
     })
     const text = await expandQuoteHandlesForAgent(ctx, agent)
-    assert.ok(text.length <= 12000, `总量超预算：${text.length}`)
     assert.equal(countBlocks(text), 3, '最多展开 3 个句柄')
-    for (const block of text.split('\n\n')) {
-      assert.ok(block.length <= 4000, `单块超预算：${block.length}`)
-    }
+    assert.equal(text.includes('要'.repeat(401)), false, '摘要应封顶 400 字')
+    assert.ok(text.length < 2000, `摘要总量不应回到全文量级：${text.length}`)
   })
 })
 
 // ── waterfall 接线 ──────────────────────────────────────────────────
 
-await test('注册在 system-prompt/assemble waterfall：追加同名且 interpolate:false 的 context', async () => {
+await test('注册在 system-prompt/assemble waterfall：追加摘要 context', async () => {
   await withTempHome(async () => {
     const ctx = makeCtx({
       events: { [TARGET_WIRE]: makeEvents([{ prompt: '引用问题', response: '引用回答' }]) },
       sessions: [TARGET_WIRE],
+      llm: makeFakeLlm({ text: '摘要：引用回答的结论。' }),
     })
     await syncSessionIndexFor(ctx, TARGET_WIRE)
 
@@ -339,7 +392,7 @@ await test('注册在 system-prompt/assemble waterfall：追加同名且 interpo
     assert.equal(result.contexts.length, 2)
     assert.equal(result.contexts[1].name, 'topic-map:引用展开')
     assert.equal(result.contexts[1].interpolate, false)
-    assert.ok(result.contexts[1].text.includes('引用回答'))
+    assert.ok(result.contexts[1].text.includes('摘要：引用回答的结论。'))
 
     const untouched = await handler({ ...assembly }, {}, async () => assembly)
     assert.equal(untouched.contexts.length, 1, '没有 agent 时不应注入')

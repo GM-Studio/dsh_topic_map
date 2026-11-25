@@ -16,6 +16,8 @@ import { join } from 'node:path'
 import {
   createHistoryTurnTool,
   flushIndexSyncs,
+  flushTurnDigests,
+  generateTurnDigest,
   registerHistoryTurnTool,
   syncSessionIndexFor,
 } from '../lib/index.js'
@@ -66,9 +68,35 @@ function makeEvents(specs) {
   return events
 }
 
+/** 假模型：记录调用次数；可 gate 卡住；可失败。 */
+function makeFakeLlm(options = {}) {
+  const state = { calls: 0 }
+  return {
+    get calls() {
+      return state.calls
+    },
+    async prepareCall(call) {
+      state.calls += 1
+      return {
+        config: { ...call, provider: 'fake', model: 'fake-1' },
+        async *stream() {
+          if (options.gate !== undefined) await options.gate.promise
+          if (options.fail === true) throw new Error('model down')
+          yield { type: 'text-delta', text: options.text ?? '摘要：定位逻辑改好了。' }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        },
+      }
+    },
+    listProviders() {
+      return [{ id: 'fake' }]
+    },
+  }
+}
+
 function makeCtx(options = {}) {
   const events = options.events ?? {}
   const revisions = options.revisions ?? {}
+  const llm = options.llm === undefined ? makeFakeLlm(options.llmOptions) : options.llm
   const workspaces = options.workspaces ?? [{
     id: 'ws-1',
     path: 'E:\\ws',
@@ -78,6 +106,7 @@ function makeCtx(options = {}) {
   const ctx = {
     get(name) {
       if (name === 'workspaceRegistry') return { list: () => workspaces }
+      if (name === 'llm') return llm
       return undefined
     },
     sessionQuery: {
@@ -96,6 +125,7 @@ function makeCtx(options = {}) {
   if (options.summary !== undefined) {
     ctx.workspaceChanges = { summary: options.summary }
   }
+  ctx.llm = llm
   return ctx
 }
 
@@ -147,13 +177,16 @@ console.log('\nhistory-tool')
 
 // ── 定义与注册 ──────────────────────────────────────────────────────
 
-await test('工具定义：name/description/parameters 符合契约', () => {
+await test('工具定义：name/description/parameters 符合摘要契约', () => {
   const ctx = makeCtx({ events: { [SESSION_A]: sampleEvents() } })
   const tool = createHistoryTurnTool(ctx)
   assert.equal(tool.name, 'history_turn')
   assert.ok(tool.description.includes('〔xxxxxxxx#N〕'), '描述必须给出句柄形态线索')
   assert.ok(tool.description.includes('轮次句柄'), '描述必须说明何时调用')
-  assert.ok(tool.description.includes('6000'), '描述应说明截断口径')
+  assert.ok(tool.description.includes('400'), '描述应说明摘要上限')
+  assert.ok(tool.description.includes('摘要'), '描述应说明返回摘要')
+  assert.ok(tool.description.includes('truncated'), '描述应说明原文未返回的标记')
+  assert.equal(tool.description.includes('6000'), false, '不应再承诺全文')
 
   assert.equal(tool.parameters.type, 'object')
   assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ['handle', 'sessionId', 'turn'])
@@ -200,11 +233,13 @@ await test('可选作用域注册：服务在就注册，缺失不崩', () => {
 
 // ── handle 解析与取回 ──────────────────────────────────────────────
 
-await test('handle 唯一匹配：取回该轮全文与命令/文件/变更', async () => {
+await test('handle 唯一匹配：取回该轮摘要与命令/文件/变更', async () => {
   await withTempHome(async () => {
     const events = sampleEvents()
+    const llm = makeFakeLlm({ text: '摘要：定位逻辑改好了，跳转恢复。' })
     const ctx = makeCtx({
       events: { [SESSION_A]: events },
+      llm,
       summary: async () => ({
         files: [{ path: 'lib/client.js', added: 3, deleted: 1 }],
         total: 1,
@@ -219,15 +254,18 @@ await test('handle 唯一匹配：取回该轮全文与命令/文件/变更', as
     assert.equal(result.ok, true, result.error)
     assert.equal(result.sessionId, SESSION_A)
     assert.equal(result.turn, 1)
-    assert.equal(result.prompt, '第二轮：为什么还是没反应')
-    assert.equal(result.response, '定位逻辑改好了。')
+    assert.equal(result.mode, 'digest')
+    assert.equal(result.summary, '摘要：定位逻辑改好了，跳转恢复。')
+    assert.equal(result.chars, result.summary.length)
+    assert.equal('prompt' in result, false, '摘要档不应再返回全文提问')
+    assert.equal('response' in result, false, '摘要档不应再返回全文回答')
     assert.equal(result.model, 'DeepSeek-Flash')
     assert.equal(result.endReason, 'completed')
     assert.deepEqual(result.commands, ['npm run build', 'npm test'])
     assert.deepEqual(result.files, ['lib/client.js'])
     assert.deepEqual(result.changes.files, [{ path: 'lib/client.js', added: 3, deleted: 1 }])
     assert.equal(result.changes.lost, false)
-    assert.equal(result.truncated, false)
+    assert.equal(result.truncated, true, '摘要档应提示还有原文')
     assert.deepEqual(result.neighbors, [
       { turn: 0, promptHead: '第一轮：把跳转修好' },
       { turn: 2, promptHead: '第三轮：继续' },
@@ -244,7 +282,8 @@ await test('sessionId + turn 直连路径', async () => {
     const result = await run(tool, { sessionId: SESSION_A, turn: 2 })
     assert.equal(result.ok, true, result.error)
     assert.equal(result.turn, 2)
-    assert.equal(result.prompt, '第三轮：继续')
+    assert.equal(result.mode, 'digest')
+    assert.ok(result.summary.length > 0)
     assert.deepEqual(result.neighbors, [{ turn: 1, promptHead: '第二轮：为什么还是没反应' }])
   })
 })
@@ -334,30 +373,33 @@ await test('会话读不到：返回明确文字而不是抛原样异常', async
   })
 })
 
-// ── 截断与邻居边界 ──────────────────────────────────────────────────
+// ── 摘要上限与邻居边界 ──────────────────────────────────────────────
 
-await test('超长内容各截断到 6000 字并置 truncated', async () => {
+await test('摘要强制 ≤400 字并置 truncated，渲染提示原文未返回', async () => {
   await withTempHome(async () => {
     const longPrompt = '问'.repeat(7000)
     const longResponse = '答'.repeat(7000)
     const events = makeEvents([{ prompt: longPrompt, response: longResponse }])
-    const ctx = makeCtx({ events: { [SESSION_A]: events } })
+    const ctx = makeCtx({
+      events: { [SESSION_A]: events },
+      llmOptions: { text: '要'.repeat(600) },
+    })
     await syncSessionIndexFor(ctx, SESSION_A)
     const tool = createHistoryTurnTool(ctx)
 
     const result = await run(tool, { handle: '4c42ff36#0' })
     assert.equal(result.ok, true)
-    assert.equal(result.prompt.length, 6000)
-    assert.equal(result.response.length, 6000)
+    assert.equal(result.summary.length, 400)
+    assert.equal(result.chars, 400)
     assert.equal(result.truncated, true)
     assert.equal(result.neighbors.length, 0, '只有一轮时没有邻居')
 
     const rendered = tool.output.render({}, result)
-    assert.ok(rendered[0].text.includes('截断'), '渲染应提示内容被截断')
+    assert.ok(rendered[0].text.includes('原文未返回'), '渲染应提示摘要压缩自更长的原文')
   })
 })
 
-await test('短内容不标 truncated；首轮无前、末轮无后', async () => {
+await test('短内容也标 truncated（摘要不等于全文）；首轮无前、末轮无后', async () => {
   await withTempHome(async () => {
     const events = makeEvents([
       { prompt: '甲' },
@@ -369,11 +411,25 @@ await test('短内容不标 truncated；首轮无前、末轮无后', async () =
     const tool = createHistoryTurnTool(ctx)
 
     const first = await run(tool, { handle: '4c42ff36#0' })
-    assert.equal(first.truncated, false)
+    assert.equal(first.truncated, true)
     assert.deepEqual(first.neighbors.map(item => item.turn), [1])
 
     const last = await run(tool, { handle: '4c42ff36#2' })
     assert.deepEqual(last.neighbors.map(item => item.turn), [1])
+  })
+})
+
+await test('摘要生成失败：工具返回人话错误，不抛异常', async () => {
+  await withTempHome(async () => {
+    const ctx = makeCtx({
+      events: { [SESSION_A]: sampleEvents() },
+      llm: makeFakeLlm({ fail: true }),
+    })
+    await syncSessionIndexFor(ctx, SESSION_A)
+    const tool = createHistoryTurnTool(ctx)
+    const result = await run(tool, { handle: '4c42ff36#0' })
+    assert.equal(result.ok, false)
+    assert.ok(result.error.includes('生成摘要失败'), result.error)
   })
 })
 

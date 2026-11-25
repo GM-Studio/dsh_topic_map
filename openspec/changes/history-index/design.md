@@ -23,7 +23,7 @@
 
 ```json
 {"turn":37,"seq":812,"start":1793000000000,"end":1793000060000,"ms":60000,
- "prompt":"…全文…","response":"…全文…","tools":["edit"],"files":["lib/client.js"],
+ "prompt":"…全文…","response":"…全文…","tools":["edit"],"files":["lib/client.js"],"commands":["node scripts/test-all.mjs"],
  "usage":{"input":13700,"output":3300,"cacheRead":0,"cacheWrite":0,"reasoning":0},
  "model":"deepseek-v4","endReason":"completed","interrupted":false,"steps":12,
  "truncated":false,
@@ -31,6 +31,10 @@
 ```
 
 `changes` 由 F-7 在事件出现时立刻拉取并落盘；`lost:true` 表示"曾变更但明细已不可读"。
+
+`commands` 的抽取（schema **3**）：`command/cmd/script` 直取；`code` 只有 shell 类工具直接当命令，
+其它工具（如 `run_code`）只**解包** `command:"…"` 字面量——解不出来就空着，**绝不把 JS 包装当命令**。
+schema < 3 的索引一律判过期：消费端先走日志兜底（结果立刻正确），后台再重建。
 
 ## 2. 增量与重建
 
@@ -64,6 +68,13 @@
   缺失/损坏/过期回退 `readSession + buildTurnRows`（全文，非预览）并套 **2 秒超时**；
   返回 `{turn(16 字段), neighbors{ turn, promptHead≤40, time, endReason }, label}`；
   错误码区分 400 参数 / 404 轮次不存在 / 502 会话读不到 / 504 兜底超时。不新增落盘。
+- **工作区反解**：`/search` 接受可选 `sessionId`，未给 `workspaceId` 时按它反解所属工作区；
+  **反解失败返回 `reason` 而不是静默退第一个**（否则会静默搜错工区）。
+  响应回传 `workspace/workspaceId` 与 `coverage{sessions,indexed,scannedFromLog,indexing}`。
+- **补齐索引**：检索命中未建索引的会话时逐个入队（并发 2、在途去重、60 秒节流）；
+  `POST /workspace-reindex {workspaceId}` 一键排空整工区，**不受节流**，立即返回 `queued`。
+- **会话命令**：`POST /session-commands {sessionId, offset?, limit?}` → `{total,offset,limit,hasMore,commands[{seq,turn,text,ok}]}`；
+  `seq` 跨轮连续、从 1 起；`limit` 封顶 100；`ok` 恒 `null`（索引没存每条命令的成败，**不编造**）。
 - 逐条 `indexOf` 线性扫描，不做倒排：1 万轮 ≈ 10MB，中文子串 20–60ms，满足 S-7。
 - 超过 5 万轮打性能日志，仍可用。
 - 只回片段与元信息；全文要显式请求单轮。
@@ -124,7 +135,25 @@
 
 ## 6. 引用协议（A-4）
 
-三层，默认只带前两层：
+分三档，默认最简：
+
+```
+① @第33轮对话〔4c42ff36#33〕                          ← 仅指针（工具上线后可用）
+② @第33轮对话〔4c42ff36#33〕 · 把左栏改成三级树        ← 指针 + 一句摘要（工具上线前的默认）
+③ 〔引用〕…（完整块，见下）                             ← 显式选，走预算确认
+```
+
+**裸指针没有意义**：模型看到 `@第33轮对话` 什么也拿不到。所以指针必须带句柄
+`<会话前缀 8 位>#<轮号>`，并配一个宿主工具：
+
+```
+history_turn({ handle: "4c42ff36#33" }) → 该轮全文（受 token 预算截断）
+```
+
+工具用 `ctx.tools.register({ name, description, parameters, output, execute })` 注册；
+description 里写明句柄格式，模型看到 `〔…#N〕` 才知道要调它。
+
+完整块格式：
 
 ```
 〔引用〕插件开发 › 话题地图 · 第 37 轮 · 2026-11-24 14:20
@@ -139,6 +168,36 @@
 - 插入前用 `tokenMeter` 估算并显示 `约 +N tokens`；超过 `citeTokenBudget`（默认 5000）二次确认。
 - 工具结果默认不带，例外：失败命令的错误首行。
 - 结构化块可折叠回指针；纯文本拼接会让指针永久丢失。
+
+### 6.1 指针解析（自动 + 工具）
+
+**显示层短、wire 层够**：用户只看到 `@第33轮对话〔4c42ff36#33〕`，模型拿到的是该轮**摘要**（≤400 字）。
+
+摘要由 `POST /turn-digest {sessionId, turn, force?}` 生成：缓存 `~/.dsh/topic-map/digests/<sessionId>#<turn>.json`
+（形状 `{revision, summary, model, at}`），`revision` 变或 `force` 才重算；提示词明确"保留结论/关键决定/命令/文件，
+不复述过程"。**摘要调用必须与归类共用 `resolveRoute` + `askOnce`**——`askOnce` 的 `limits` 要带 `sessionId`，
+否则 opencode 适配器会 400 MissingSessionID（真机踩过）。
+
+两条通道：
+
+1. **自动展开（首选）**——挂异步 `system-prompt/assemble` waterfall：`await next()` 后往 `assembly.contexts`
+   追加 `{ name:'topic-map:引用展开', text, interpolate:false }`。
+   为什么不用 `systemPrompt.context`：它的 `text` 只能同步返回，而展开要异步读索引/日志。
+   `interpolate:false` 是必须的——用户内容里可能出现 `{{`。
+2. **工具兜底**——`history_turn({ handle | sessionId+turn })`，description 里写明句柄格式，
+   模型看到 `〔…〕` 才知道该调它。
+
+口径：
+
+- 只扫最近 **20 条人类消息**（`role:'user' && source.kind==='user'`），最多 **3 个**句柄，按出现顺序去重；
+- 每块 ≤ **4000 字**、总量 ≤ **12000 字**（≈8k token），超限带截断标记；
+- 只认 `〔8 位十六进制#轮号〕`；**不接受 `·全文` 后缀**（该档已取消）；其它形态走工具；
+- 摘要生成失败时降级为"该轮回答前 400 字"并在块首标注，**插入流程不受影响**；
+- `/turn-detail` 成功后 fire-and-forget 预生成摘要（并发 1、在途去重、缓存新鲜跳过、失败只记诊断），
+  所以"先看详情再引用"通常零等待；
+- 当前会话用内存 `buildTurnRows`（不依赖索引），历史会话索引优先、日志兜底，整体 2 秒超时；
+- **不跨工作区**：跨区引用写"当前工作区没有匹配该前缀"，不猜；
+- 工具的前缀匹配：唯一命中才用，多个命中**报歧义并列候选**，要求改用完整 sessionId——猜错会贴错全文。
 
 ## 7. 动作的实现路径
 

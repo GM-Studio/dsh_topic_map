@@ -6,7 +6,11 @@
 ## F — 索引（事实层）
 
 - **F-1 每轮一条记录，存全文。**
-  字段：`turn, seq, start, end, ms, prompt, response, tools[], files[], usage{}, model, endReason, interrupted, steps`。
+  字段：`turn, seq, start, end, ms, prompt, response, tools[], files[], commands[], usage{}, model, endReason, interrupted, steps`。
+  `commands` 抽取规则：`command/cmd/script` 直取；`code` **仅 shell 类工具**（shell/bash/terminal/exec/powershell/cmd，
+  含 `run_shell` 这类分词）直取，其它工具只**解包** `command:` 后的字符串字面量（双/单/反引号，还原 `\n`）；
+  **解析失败为空，绝不回退整段 JS**；一次 tool/call 只取第一条；每轮上限 8 条、单条 500 字、按序去重。
+  已知限制：`run_code` 里数组包多条命令时只取第一条。
   全文不截断，**不复用** `PREVIEW_LIMIT`（现状 80/160 字）；单轮 `prompt+response` **合计**上限 32k 字符
   （先保提问、余量给回答），超限置 `truncated` 标志。
   验收：索引行数 == 轮数；任取一轮，`prompt` 与日志原文一致。
@@ -109,8 +113,14 @@
 - **A-3 状态（三个开关 + 一行备注）。** `待跟进 / 已解决 / 重要`，可叠用。
   **只在 V-8 消费时才实现**；不被消费则不做。
 
-- **A-4 引用（三层 + 预算）。**
-  - 默认带：指针（会话·轮次·时间·话题）+ 摘要（意图一句 + 结论三条），约 230 token。
+- **A-4 引用（单档 + 摘要展开）。**
+  - **只有一档**：插入指针 `@第33轮对话〔4c42ff36#33〕`，不带后缀、不拼正文。
+    （曾设计"摘要/全文"两档，按用户决定**取消**；`·全文` 后缀不再解析。）
+  - **指针必须自带可解析句柄** `<会话前缀8位>#<轮号>`：裸 `@第33轮对话` 对模型毫无意义。
+  - **自动展开**：宿主在 `system-prompt/assemble` 扫描最近 20 条人类消息里的 `〔8hex#N〕`，
+    最多 3 个，`interpolate:false`；注入的是该轮**摘要**（≤400 字，`/turn-digest`，按轮次缓存）。
+  - 摘要生成失败 → 降级为"该轮回答前 400 字"并在块首标注，**插入流程不受影响**。
+  - 摘要在 `/turn-detail` 成功后**后台预生成**（并发 1、在途去重），先看详情再引用通常零等待。
   - 手动勾选才带：提问全文 / 回答全文。**工具结果永不默认**，仅"失败命令的错误首行"。
   - 插入前用 `tokenMeter` 估算并显示 `约 +N tokens`；超过 `citeTokenBudget`（默认 **5000**，可配置）须二次确认。
   - 载体是结构化引用块（可折叠回指针），不是拼接文本。

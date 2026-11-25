@@ -101,7 +101,9 @@ async function mountSettings(options) {
     }
     if (action === 'workspace-reindex') return { value: { queued: 2 } }
     if (action === 'index-stats') {
-      if (opts.indexStatsError !== undefined) return { status: 503, ok: false, error: opts.indexStatsError }
+      if (opts.indexStatsError !== undefined) {
+        return { status: opts.indexStatsStatus === undefined ? 503 : opts.indexStatsStatus, ok: false, error: opts.indexStatsError }
+      }
       return {
         value: opts.indexStats === undefined
           ? { sessions: 12, turns: 34, bytes: 3355443, digests: 30, digestBytes: 400000 }
@@ -271,11 +273,13 @@ await test('rail 设置：设置页写的值进 localStorage，外部改值设�
   assert.ok(textOf(runtime.tree).includes('wide（320px）'))
 })
 
-await test('索引体积失败：显示 —，title 写 Host 原因', async () => {
-  const { tree } = await mountSettings({ indexStatsError: '读不到索引目录' })
-  const node = byData(tree, 'data-setting', 'indexStats')[0]
-  assert.equal(textOf(node), '—')
-  assert.ok(String(node.props.title).includes('读不到索引目录'), 'title 要能解释为什么没有数字')
+await test('索引体积失败（404/503）：显示 —，title 写 Host 原因', async () => {
+  for (const status of [404, 503]) {
+    const { tree } = await mountSettings({ indexStatsError: '读不到索引目录（' + status + '）', indexStatsStatus: status })
+    const node = byData(tree, 'data-setting', 'indexStats')[0]
+    assert.equal(textOf(node), '—')
+    assert.ok(String(node.props.title).includes('读不到索引目录（' + status + '）'), 'title 要能解释为什么没有数字')
+  }
 })
 
 await test('重建索引：POST /workspace-reindex，显示排队结果', async () => {

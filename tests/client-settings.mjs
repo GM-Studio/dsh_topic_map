@@ -26,11 +26,15 @@ import {
 const src = readClient()
 const RIGHT_TABS = new Function(
   'HISTORY_ID', 'HISTORY_KIND', 'HISTORY_TITLE',
+  'CATEGORIES_ID', 'CATEGORIES_KIND', 'CATEGORIES_TITLE',
+  'CLUE_ID', 'CLUE_KIND', 'CLUE_TITLE',
   'STATS_ID', 'STATS_KIND', 'STATS_TITLE',
   'SETTINGS_ID', 'SETTINGS_KIND', 'SETTINGS_TITLE',
   `var RIGHT_TABS = ${extractAssignment(src, 'RIGHT_TABS')};return RIGHT_TABS`,
 )(
   'dsh-topic-map:history', 'topic-map-history', '历史',
+  'dsh-topic-map:categories', 'topic-map-categories', '分类',
+  'dsh-topic-map:clue', 'topic-map-clue', '线索',
   'dsh-topic-map:stats', 'topic-map-stats', '统计',
   'dsh-topic-map:settings', 'topic-map-settings', '设置',
 )

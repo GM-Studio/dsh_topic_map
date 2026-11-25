@@ -58,6 +58,12 @@ const STATSFMT_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/
 const STATSFMT_END = '    // ══ stats-format 生成段结束 ══'
 const SETTINGVIEW_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/settings-view.js'
 const SETTINGVIEW_END = '    // ══ settings-view 生成段结束 ══'
+const CLUEVIEW_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/clue-view.js'
+const CLUEVIEW_END = '    // ══ clue-view 生成段结束 ══'
+const CHANGESVIEW_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/changes-view.js'
+const CHANGESVIEW_END = '    // ══ changes-view 生成段结束 ══'
+const ROLLBACKPLAN_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/rollback-plan.js'
+const ROLLBACKPLAN_END = '    // ══ rollback-plan 生成段结束 ══'
 
 const themeSrc = strip(readFileSync(join(root, 'lib', 'theme.js'), 'utf8'))
 const themeWrapped = [
@@ -288,6 +294,46 @@ const settingWrapped = [
   SETTINGVIEW_END,
 ].join('\n')
 
+const clueviewSrc = strip(readFileSync(join(root, 'lib', 'clue-view.js'), 'utf8'))
+const clueviewWrapped = [
+  CLUEVIEW_START,
+  '    // 线索时间线视图模型（V-4），纯函数，独立测试过（tests/clue-view.mjs）。',
+  '    var CLUEVIEW = (function () {',
+  indent(clueviewSrc),
+  '      return {',
+  '        buildClue: buildClue,',
+  '      }',
+  '    })()',
+  CLUEVIEW_END,
+].join('\n')
+
+const changesviewSrc = strip(readFileSync(join(root, 'lib', 'changes-view.js'), 'utf8'))
+const changesviewWrapped = [
+  CHANGESVIEW_START,
+  '    // 变更清单视图模型（P3-1 / A-7），纯函数，独立测试过（tests/changes-view.mjs）。',
+  '    var CHANGESVIEW = (function () {',
+  indent(changesviewSrc),
+  '      return {',
+  '        buildChanges: buildChanges, groupByKind: groupByKind,',
+  '        sortChanges: sortChanges,',
+  '      }',
+  '    })()',
+  CHANGESVIEW_END,
+].join('\n')
+
+const rollbackplanSrc = strip(readFileSync(join(root, 'lib', 'rollback-plan.js'), 'utf8'))
+const rollbackplanWrapped = [
+  ROLLBACKPLAN_START,
+  '    // 回滚预演四态（P3-2 / A-12），纯函数，独立测试过（tests/rollback-plan.mjs）。',
+  '    var ROLLBACKPLAN = (function () {',
+  indent(rollbackplanSrc),
+  '      return {',
+  '        planRollback: planRollback, formatPlan: formatPlan,',
+  '      }',
+  '    })()',
+  ROLLBACKPLAN_END,
+].join('\n')
+
 const clientPath = join(root, 'lib', 'client.js')
 let client = readFileSync(clientPath, 'utf8')
 
@@ -328,6 +374,9 @@ console.log('cite:', splice(CITE_START, CITE_END, citeWrapped, HITVIEW_END))
 console.log('rail-view:', splice(RAILVIEW_START, RAILVIEW_END, railviewWrapped, CITE_END))
 console.log('stats-format:', splice(STATSFMT_START, STATSFMT_END, statsWrapped, RAILVIEW_END))
 console.log('settings-view:', splice(SETTINGVIEW_START, SETTINGVIEW_END, settingWrapped, STATSFMT_END))
+console.log('clue-view:', splice(CLUEVIEW_START, CLUEVIEW_END, clueviewWrapped, SETTINGVIEW_END))
+console.log('changes-view:', splice(CHANGESVIEW_START, CHANGESVIEW_END, changesviewWrapped, CLUEVIEW_END))
+console.log('rollback-plan:', splice(ROLLBACKPLAN_START, ROLLBACKPLAN_END, rollbackplanWrapped, CHANGESVIEW_END))
 
 writeFileSync(clientPath, client)
 console.log('已写入 lib/client.js')

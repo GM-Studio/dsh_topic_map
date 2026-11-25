@@ -47,7 +47,7 @@ function usedNames(prefix) {
 console.log('\nbundle')
 
 // ── 嵌入模块 ────────────────────────────────────────────────────────
-for (const name of ['THEME', 'FILTER', 'PM', 'UISTATE', 'FOLD', 'DELIV', 'REPORT', 'GMODE', 'SCAT', 'HITVIEW', 'CITE', 'RAILVIEW', 'STATSFMT', 'SETTINGVIEW']) {
+for (const name of ['THEME', 'FILTER', 'PM', 'UISTATE', 'FOLD', 'DELIV', 'REPORT', 'GMODE', 'SCAT', 'HITVIEW', 'CITE', 'RAILVIEW', 'STATSFMT', 'SETTINGVIEW', 'CLUEVIEW', 'CHANGESVIEW', 'ROLLBACKPLAN']) {
   test(`${name} 的导出覆盖客户端的全部使用`, () => {
     const block = moduleBlock(name)
     assert.ok(block !== null, `bundle 里找不到 ${name}，生成段缺失`)
@@ -77,6 +77,9 @@ test('所有生成段都在 bundle 里', () => {
     '从 lib/rail-view.js',
     '从 lib/stats-format.js',
     '从 lib/settings-view.js',
+    '从 lib/clue-view.js',
+    '从 lib/changes-view.js',
+    '从 lib/rollback-plan.js',
   ]) {
     assert.ok(src.includes(marker), `缺少生成段：${marker}`)
   }
@@ -178,6 +181,9 @@ for (const [name, file] of [
   ['RAILVIEW', 'rail-view.js'],
   ['STATSFMT', 'stats-format.js'],
   ['SETTINGVIEW', 'settings-view.js'],
+  ['CLUEVIEW', 'clue-view.js'],
+  ['CHANGESVIEW', 'changes-view.js'],
+  ['ROLLBACKPLAN', 'rollback-plan.js'],
 ]) {
   test(`${name} 嵌入段与 lib/${file} 逐字节一致`, () => {
     const block = moduleBlock(name)
@@ -244,6 +250,67 @@ test('SETTINGVIEW 嵌入后能真实执行（模型 / 校验 / 差异）', () =>
     SETTINGVIEW.diffConfig({ a: 1, b: 2 }, { a: 1, b: 3, c: 4 }),
     { b: 3, c: 4 },
   )
+})
+
+test('CLUEVIEW 嵌入后能真实执行（时间线聚类 / 统计 / 空态）', () => {
+  const CLUEVIEW = evalEmbedded('CLUEVIEW')
+  const built = CLUEVIEW.buildClue([
+    { sessionId: 's1', sessionTitle: '会话 A', turn: 1, time: 1_700_000_000_000, promptHead: '第一次提索引' },
+    { sessionId: 's1', sessionTitle: '会话 A', turn: 2, time: 1_700_000_060_000, promptHead: '同一天又提索引' },
+    { sessionId: 's2', sessionTitle: '会话 B', turn: 5, time: 1_700_200_000_000, promptHead: '另一个会话' },
+  ], { keywords: '索引', now: 1_700_300_000_000 })
+  assert.equal(built.empty, false)
+  assert.equal(built.timeline.length, 2)
+  assert.equal(built.timeline[0].delta, '首次提及')
+  assert.equal(built.timeline[0].count, 2)
+  assert.deepEqual(built.stats.sessions, 2)
+  assert.deepEqual(built.stats.turns, 3)
+  assert.equal(built.stats.spanDays, 2)
+  assert.equal(CLUEVIEW.buildClue([], { keywords: '' }).empty, true)
+})
+
+test('CHANGESVIEW 嵌入后能真实执行（分组 / ±行 / lost）', () => {
+  const CHANGESVIEW = evalEmbedded('CHANGESVIEW')
+  const view = CHANGESVIEW.buildChanges({
+    changes: {
+      files: [
+        { path: 'lib/a.js', added: 3, deleted: 1 },
+        { path: 'README.md', added: 2, deleted: 0 },
+        { path: 'package.json', added: 1, deleted: 1 },
+        { path: 'icon.svg', added: 0, deleted: 4 },
+      ],
+    },
+  })
+  assert.equal(view.files.length, 4)
+  assert.deepEqual(view.totals, { files: 4, added: 6, deleted: 6 })
+  assert.deepEqual(
+    CHANGESVIEW.groupByKind(view.files).map(group => group.kind),
+    ['code', 'doc', 'config', 'other'],
+  )
+  assert.deepEqual(
+    CHANGESVIEW.sortChanges(view.files, 'size').map(file => file.path),
+    ['icon.svg', 'lib/a.js', 'package.json', 'README.md'],
+  )
+  const lost = CHANGESVIEW.buildChanges({ changes: { lost: true } })
+  assert.equal(lost.lost, true)
+  assert.equal(lost.summary, '该轮变更明细已不可读')
+})
+
+test('ROLLBACKPLAN 嵌入后能真实执行（四态 / 文本）', () => {
+  const ROLLBACKPLAN = evalEmbedded('ROLLBACKPLAN')
+  const preview = ROLLBACKPLAN.planRollback(
+    [
+      { path: 'a.js', added: 2, deleted: 0, hash: 'aaa' },
+      { path: 'b.js', added: 1, deleted: 1, beforeHash: 'same' },
+      { path: 'c.js', added: 2, deleted: 2, hash: 'expected' },
+      { path: 'd.js', added: 1, deleted: 0, hash: 'x' },
+    ],
+    { 'a.js': 'aaa', 'b.js': 'same', 'c.js': 'changed', 'd.js': null },
+  )
+  assert.deepEqual(preview.counts, { apply: 1, same: 1, modified: 1, missing: 1 })
+  const text = ROLLBACKPLAN.formatPlan(preview.plan)
+  assert.ok(text.includes('✓ 可回滚  a.js'))
+  assert.ok(text.includes('⚠ 已被修改  c.js'))
 })
 
 test('接管层已接进 apply（不是写完忘了挂）', () => {

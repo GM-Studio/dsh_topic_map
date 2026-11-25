@@ -1,0 +1,210 @@
+/**
+ * 线索 tab：/search 参数、时间线聚类、delta 徽标、统计、空态与失败态。
+ *
+ * 组件原样取自 lib/client.js；buildClue 用嵌入前的那份纯模块（同一实现），
+ * 假 fetch 只回 /search 的信封。
+ */
+
+import { strict as assert } from 'node:assert'
+import * as CLUEVIEW from '../lib/clue-view.js'
+import {
+  readClient,
+  extractFunction,
+  extractAssignment,
+  renderComponent,
+  makeFetch,
+  makeRunner,
+  byClass,
+  findAll,
+  textOf,
+  click,
+  change,
+} from './client-harness.mjs'
+
+const src = readClient()
+const RIGHT_TABS = new Function(
+  'HISTORY_ID', 'HISTORY_KIND', 'HISTORY_TITLE',
+  'CATEGORIES_ID', 'CATEGORIES_KIND', 'CATEGORIES_TITLE',
+  'CLUE_ID', 'CLUE_KIND', 'CLUE_TITLE',
+  'STATS_ID', 'STATS_KIND', 'STATS_TITLE',
+  'SETTINGS_ID', 'SETTINGS_KIND', 'SETTINGS_TITLE',
+  `var RIGHT_TABS = ${extractAssignment(src, 'RIGHT_TABS')};return RIGHT_TABS`,
+)(
+  'dsh-topic-map:history', 'topic-map-history', '历史',
+  'dsh-topic-map:categories', 'topic-map-categories', '分类',
+  'dsh-topic-map:clue', 'topic-map-clue', '线索',
+  'dsh-topic-map:stats', 'topic-map-stats', '统计',
+  'dsh-topic-map:settings', 'topic-map-settings', '设置',
+)
+
+const CLUE_EMPTY_TEXT = (src.match(/var CLUE_EMPTY_TEXT = '([^']*)'/) || [])[1]
+const { test, finish } = makeRunner('client-clue')
+
+const NOW = Date.now()
+const DAY = 24 * 60 * 60 * 1000
+/** 某个本地自然日的 09:00，保证"同一天"不受运行时刻影响。 */
+function dayAt(offsetDays, hour) {
+  const date = new Date(NOW - offsetDays * DAY)
+  date.setHours(hour, 0, 0, 0)
+  return date.getTime()
+}
+const HITS = [
+  // 故意乱序：组件必须先按时间升序再交给 buildClue。
+  { sessionId: 's2', title: '会话 B', turn: 9, time: dayAt(2, 9), promptHead: '另一个会话也在查索引' },
+  { sessionId: 's1', title: '会话 A', turn: 2, time: dayAt(3, 9), promptHead: '第一次讨论索引' },
+  { sessionId: 's1', title: '会话 A', turn: 11, time: dayAt(1, 9), promptHead: '索引终于跑通了' },
+  { sessionId: 's1', title: '会话 A', turn: 5, time: dayAt(3, 13), promptHead: '同一天又补了一版索引' },
+]
+
+const COMPONENT_SOURCE = [
+  extractFunction(src, 'unrefTimer'),
+  extractFunction(src, 'categoryErrorText'),
+  extractFunction(src, 'clueRowsOfHits'),
+  extractFunction(src, 'clueStatsText'),
+  extractFunction(src, 'requestTopicMap'),
+  extractFunction(src, 'RightTabStrip'),
+  extractFunction(src, 'ClueTabBody'),
+].join('\n')
+
+const ERROR_TEXT = error => String(error && error.message ? error.message : error)
+
+async function mountClue(handler) {
+  const fake = makeFetch(handler)
+  const located = []
+  const runtime = await renderComponent(
+    COMPONENT_SOURCE,
+    'ClueTabBody',
+    [
+      'CLUEVIEW', 'RIGHT_TABS', 'CLUE_KIND', 'CLUE_TITLE', 'CLUE_EMPTY_TEXT',
+      'CLUE_SEARCH_PLACEHOLDER', 'fetch', 'errorText', 'useTopicMapTheme', 'locateHistoryTurn',
+    ],
+    [
+      CLUEVIEW, RIGHT_TABS, 'topic-map-clue', '线索', CLUE_EMPTY_TEXT,
+      '关键词，空格分隔', fake.fetch, ERROR_TEXT, function () {},
+      function (sessionId, turn, seq, currentSessionId) {
+        located.push({ sessionId: sessionId, turn: turn, seq: seq, currentSessionId: currentSessionId })
+        return Promise.resolve({ ok: true })
+      },
+    ],
+    { sessionId: 's1', openTab: function () {} },
+  )
+  return { runtime: runtime, tree: runtime.tree, calls: fake.calls, located: located }
+}
+
+function searches(calls) {
+  return calls.filter(call => call.action === 'search')
+}
+
+async function searchFor(runtime, text) {
+  const input = byClass(runtime.tree, 'dsh_tm_clueinput')[0]
+  change(input, text)
+  await runtime.settle()
+  const button = byClass(runtime.tree, 'dsh_tm_cluesubmit')[0]
+  click(button)
+  await runtime.settle()
+}
+
+await test('初始空态：输入关键词，看看这个话题在这些会话里怎么演变的；不发请求', async () => {
+  const { tree, calls } = await mountClue(() => ({ value: { hits: [], total: 0 } }))
+  const empty = byClass(tree, 'dsh_tm_clueempty')[0]
+  assert.equal(textOf(empty), '输入关键词，看看这个话题在这些会话里怎么演变的')
+  assert.equal(searches(calls).length, 0, '空输入不检索')
+  assert.equal(byClass(tree, 'dsh_tm_cluestats').length, 0)
+})
+
+await test('搜索：POST /search {sessionId, keywords}；统计 / 时间线聚类 / delta 徽标', async () => {
+  const { runtime, calls } = await mountClue(({ action }) => {
+    if (action === 'search') return { value: { hits: HITS, total: HITS.length, truncated: false } }
+    return { ok: false, error: 'unexpected ' + action }
+  })
+  await searchFor(runtime, '  索引  ')
+
+  const sent = searches(calls)
+  assert.equal(sent.length, 1)
+  assert.deepEqual(sent[0].body, { sessionId: 's1', keywords: '索引' })
+  assert.equal(sent[0].method, 'POST')
+
+  assert.equal(byClass(runtime.tree, 'dsh_tm_cluestats').length, 1)
+  assert.equal(textOf(byClass(runtime.tree, 'dsh_tm_cluestats')[0]), '2 个会话 / 4 轮 / 跨度 2 天')
+
+  const rows = byClass(runtime.tree, 'dsh_tm_cluerow')
+  assert.equal(rows.length, 3, '相邻同会话同日合并成一个时间点')
+  assert.deepEqual(byClass(runtime.tree, 'dsh_tm_clueturn').map(textOf), ['第 2 轮', '第 9 轮', '第 11 轮'])
+  assert.deepEqual(byClass(runtime.tree, 'dsh_tm_cluedelta').map(textOf), ['首次提及', '首次提及', '第 3 次'])
+  assert.deepEqual(byClass(runtime.tree, 'dsh_tm_clueat').map(textOf), ['会话 A', '会话 B', '会话 A'])
+  assert.equal(textOf(byClass(runtime.tree, 'dsh_tm_cluetime')[0]), '3 天前')
+  assert.equal(textOf(byClass(runtime.tree, 'dsh_tm_clueheadtext')[0]), '第一次讨论索引')
+  assert.equal(textOf(byClass(runtime.tree, 'dsh_tm_cluesub')[0]), '同日合并 2 次')
+  assert.equal(byClass(runtime.tree, 'dsh_tm_clueempty').length, 0)
+})
+
+await test('点时间线行 → 定位到该会话该轮', async () => {
+  const { runtime, located } = await mountClue(({ action }) => {
+    if (action === 'search') return { value: { hits: HITS, total: HITS.length } }
+    return { ok: false, error: 'unexpected ' + action }
+  })
+  await searchFor(runtime, '索引')
+  click(byClass(runtime.tree, 'dsh_tm_cluerow')[0])
+  await runtime.settle()
+  assert.deepEqual(located, [{ sessionId: 's1', turn: 2, seq: null, currentSessionId: 's1' }])
+  assert.ok(textOf(byClass(runtime.tree, 'dsh_tm_cluenotice')[0]).includes('已定位到第 2 轮'))
+})
+
+await test('空结果：没有找到与关键词相关的轮次，不显示统计', async () => {
+  const { runtime } = await mountClue(({ action }) => {
+    if (action === 'search') return { value: { hits: [], total: 0, truncated: false } }
+    return { ok: false, error: 'unexpected ' + action }
+  })
+  await searchFor(runtime, '不存在的词')
+  assert.equal(textOf(byClass(runtime.tree, 'dsh_tm_clueempty')[0]),
+    '没有找到与「不存在的词」相关的轮次')
+  assert.equal(byClass(runtime.tree, 'dsh_tm_cluestats').length, 0)
+})
+
+await test('失败：显示 Host 中文错误并可重试', async () => {
+  let attempt = 0
+  const { runtime, calls } = await mountClue(({ action }) => {
+    if (action === 'search') {
+      attempt += 1
+      if (attempt === 1) return { status: 503, ok: false, error: '检索服务不可用' }
+      return { value: { hits: HITS, total: HITS.length } }
+    }
+    return { ok: false, error: 'unexpected ' + action }
+  })
+  await searchFor(runtime, '索引')
+  const errorBox = byClass(runtime.tree, 'dsh_tm_clueerr')[0]
+  assert.ok(errorBox !== undefined)
+  assert.ok(textOf(errorBox).includes('检索失败：检索服务不可用'), 'Host 中文错误原样展示')
+  const retry = byClass(runtime.tree, 'dsh_tm_clueretry')[0]
+  assert.ok(retry !== undefined)
+  click(retry)
+  await runtime.settle()
+  assert.equal(searches(calls).length, 2)
+  assert.equal(byClass(runtime.tree, 'dsh_tm_cluerow').length, 3, '重试成功后恢复时间线')
+  assert.equal(byClass(runtime.tree, 'dsh_tm_clueerr').length, 0)
+})
+
+await test('清空关键词再搜索：回到空态且不发请求', async () => {
+  const { runtime, calls } = await mountClue(({ action }) => {
+    if (action === 'search') return { value: { hits: HITS, total: HITS.length } }
+    return { ok: false, error: 'unexpected ' + action }
+  })
+  await searchFor(runtime, '索引')
+  assert.equal(searches(calls).length, 1)
+  await searchFor(runtime, '   ')
+  assert.equal(searches(calls).length, 1, '空关键词不应再发请求')
+  assert.equal(textOf(byClass(runtime.tree, 'dsh_tm_clueempty')[0]), CLUE_EMPTY_TEXT)
+})
+
+await test('截断可见：命中 N 轮时写明只展示前 M 条', async () => {
+  const { runtime } = await mountClue(({ action }) => {
+    if (action === 'search') return { value: { hits: HITS, total: 99, truncated: true } }
+    return { ok: false, error: 'unexpected ' + action }
+  })
+  await searchFor(runtime, '索引')
+  const note = byClass(runtime.tree, 'dsh_tm_cluetruncated')[0]
+  assert.ok(note !== undefined)
+  assert.equal(textOf(note), '命中 99 轮，只展示前 4 条')
+})
+
+finish()

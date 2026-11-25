@@ -48,6 +48,7 @@ function usedNames(prefix) {
 const MODULES = [
   'THEME', 'FILTER', 'PM', 'UISTATE', 'FOLD', 'DELIV', 'REPORT', 'GMODE', 'SCAT',
   'HITVIEW', 'CITE', 'RAILVIEW', 'STATSFMT', 'SETTINGVIEW',
+  'CLUEVIEW', 'CHANGESVIEW', 'ROLLBACKPLAN',
 ]
 let failed = false
 

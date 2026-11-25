@@ -22,11 +22,15 @@ import {
 const src = readClient()
 const RIGHT_TABS = new Function(
   'HISTORY_ID', 'HISTORY_KIND', 'HISTORY_TITLE',
+  'CATEGORIES_ID', 'CATEGORIES_KIND', 'CATEGORIES_TITLE',
+  'CLUE_ID', 'CLUE_KIND', 'CLUE_TITLE',
   'STATS_ID', 'STATS_KIND', 'STATS_TITLE',
   'SETTINGS_ID', 'SETTINGS_KIND', 'SETTINGS_TITLE',
   `var RIGHT_TABS = ${extractAssignment(src, 'RIGHT_TABS')};return RIGHT_TABS`,
 )(
   'dsh-topic-map:history', 'topic-map-history', '历史',
+  'dsh-topic-map:categories', 'topic-map-categories', '分类',
+  'dsh-topic-map:clue', 'topic-map-clue', '线索',
   'dsh-topic-map:stats', 'topic-map-stats', '统计',
   'dsh-topic-map:settings', 'topic-map-settings', '设置',
 )
@@ -40,6 +44,8 @@ function setupRegistration() {
   const effects = []
   const stubs = {
     HistoryTabBody: function HistoryTabBody() {},
+    CategoriesTabBody: function CategoriesTabBody() {},
+    ClueTabBody: function ClueTabBody() {},
     StatsTabBody: function StatsTabBody() {},
     SettingsTabBody: function SettingsTabBody() {},
     HistoryHeaderButton: function HistoryHeaderButton() {},
@@ -74,38 +80,49 @@ function setupRegistration() {
     extractFunction(src, 'registerHistorySurface'),
   ].join('\n')
   const built = new Function(
-    'RIGHT_TABS', 'HISTORY_ID', 'HISTORY_TITLE', 'HISTORY_KIND', 'STATS_KIND', 'SETTINGS_KIND',
-    'HistoryTabBody', 'StatsTabBody', 'SettingsTabBody', 'HistoryHeaderButton', 'openHistoryTab',
+    'RIGHT_TABS', 'HISTORY_ID', 'HISTORY_TITLE', 'HISTORY_KIND',
+    'CATEGORIES_KIND', 'CLUE_KIND', 'STATS_KIND', 'SETTINGS_KIND',
+    'HistoryTabBody', 'CategoriesTabBody', 'ClueTabBody', 'StatsTabBody', 'SettingsTabBody',
+    'HistoryHeaderButton', 'openHistoryTab',
     'historyDiag', 'errorText',
     `${source};return { registerHistorySurface: registerHistorySurface, openRightTab: openRightTab }`,
   )(
-    RIGHT_TABS, 'dsh-topic-map:history', '历史', 'topic-map-history', 'topic-map-stats', 'topic-map-settings',
-    stubs.HistoryTabBody, stubs.StatsTabBody, stubs.SettingsTabBody, stubs.HistoryHeaderButton, stubs.openHistoryTab,
+    RIGHT_TABS, 'dsh-topic-map:history', '历史', 'topic-map-history',
+    'topic-map-categories', 'topic-map-clue', 'topic-map-stats', 'topic-map-settings',
+    stubs.HistoryTabBody, stubs.CategoriesTabBody, stubs.ClueTabBody, stubs.StatsTabBody, stubs.SettingsTabBody,
+    stubs.HistoryHeaderButton, stubs.openHistoryTab,
     function () {}, function (error) { return String(error && error.message ? error.message : error) },
   )
   built.registerHistorySurface(scope)
   return { defs, slots, opens, effects, stubs, scope, openRightTab: built.openRightTab }
 }
 
-await test('三个 tab 注册为同一右栏的三种 kind（含各自 guide 条目）', async () => {
+await test('五个 tab 注册为同一右栏的五种 kind（含各自 guide 条目）', async () => {
   const setup = setupRegistration()
-  assert.equal(setup.defs.length, 3, '必须注册历史 / 统计 / 设置三个 definition')
-  assert.deepEqual(setup.defs.map(def => def.kind), ['topic-map-history', 'topic-map-stats', 'topic-map-settings'])
-  assert.deepEqual(setup.defs.map(def => def.id), ['dsh-topic-map:history', 'dsh-topic-map:stats', 'dsh-topic-map:settings'])
-  assert.deepEqual(setup.defs.map(def => def.title()), ['历史', '统计', '设置'])
+  assert.equal(setup.defs.length, 5, '必须注册历史 / 分类 / 线索 / 统计 / 设置五个 definition')
+  assert.deepEqual(setup.defs.map(def => def.kind), [
+    'topic-map-history', 'topic-map-categories', 'topic-map-clue', 'topic-map-stats', 'topic-map-settings',
+  ])
+  assert.deepEqual(setup.defs.map(def => def.id), [
+    'dsh-topic-map:history', 'dsh-topic-map:categories', 'dsh-topic-map:clue',
+    'dsh-topic-map:stats', 'dsh-topic-map:settings',
+  ])
+  assert.deepEqual(setup.defs.map(def => def.title()), ['历史', '分类', '线索', '统计', '设置'])
   for (const def of setup.defs) {
     assert.equal(def.guide.length, 1, `${def.id} 应有一张 guide 卡片`)
     assert.equal(def.keepMounted, true)
   }
   // key 必须等于 definition.id，否则正文永远分不到这个 tab。
   const paneSlots = setup.slots.filter(slot => slot.name === 'sidebar.right.pane.tab')
-  assert.equal(paneSlots.length, 3)
+  assert.equal(paneSlots.length, 5)
   assert.deepEqual(paneSlots.map(slot => slot.definition.key), setup.defs.map(def => def.id))
   assert.deepEqual(paneSlots.map(slot => slot.definition.name), [
     'sidebar.right.pane.tab', 'sidebar.right.pane.tab', 'sidebar.right.pane.tab',
+    'sidebar.right.pane.tab', 'sidebar.right.pane.tab',
   ])
   assert.deepEqual(paneSlots.map(slot => slot.component), [
-    setup.stubs.HistoryTabBody, setup.stubs.StatsTabBody, setup.stubs.SettingsTabBody,
+    setup.stubs.HistoryTabBody, setup.stubs.CategoriesTabBody, setup.stubs.ClueTabBody,
+    setup.stubs.StatsTabBody, setup.stubs.SettingsTabBody,
   ])
   const header = setup.slots.find(slot => slot.name === 'conversation.session.header.utilities')
   assert.ok(header !== undefined, '历史入口图标仍应注册')
@@ -137,14 +154,16 @@ function renderTabStrip(active, onOpen) {
   return component({ active: active, open: onOpen })
 }
 
-await test('切换条渲染三个 tab，当前 tab 标 on，点击调用 openTab', async () => {
+await test('切换条渲染五个 tab，当前 tab 标 on，点击调用 openTab', async () => {
   const opens = []
   const tree = renderTabStrip('topic-map-stats', kind => opens.push(kind))
   const tabs = findAll(tree, node => String(node.props.className || '').split(/\s+/).includes('dsh_tm_righttab'))
-  assert.deepEqual(tabs.map(tab => textOf(tab)), ['历史', '统计', '设置'])
+  assert.deepEqual(tabs.map(tab => textOf(tab)), ['历史', '分类', '线索', '统计', '设置'])
   assert.equal(tabs[0].props['data-kind'], 'topic-map-history')
-  assert.equal(tabs[1].props.className.includes('dsh_tm_righttab_on'), true, '统计应为当前 tab')
-  click(tabs[2])
+  assert.equal(tabs[1].props['data-kind'], 'topic-map-categories')
+  assert.equal(tabs[2].props['data-kind'], 'topic-map-clue')
+  assert.equal(tabs[3].props.className.includes('dsh_tm_righttab_on'), true, '统计应为当前 tab')
+  click(tabs[4])
   assert.deepEqual(opens, ['topic-map-settings'])
 })
 

@@ -563,6 +563,40 @@ await test('自检失败：拆掉自绘轨、保留原生、灰字写明「原�
   dispose()
 })
 
+await test('折叠宽度按轮号位数自适应：1/2/3/4 位数字完整，刻度仍在', async () => {
+  for (const maxTurn of [7, 12, 112, 1120]) {
+    const scene = buildScene()
+    const outline = {
+      available: true,
+      turns: [
+        { turn: 1, promptHead: '第一轮', endSeq: 10 },
+        { turn: maxTurn, promptHead: '最大轮', endSeq: maxTurn * 10 },
+      ],
+    }
+    const { RAILTAKE, win, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(outline) })
+    await flush()
+    RAILTAKE.setCollapsed(true)
+    win.runTimers()
+    await flush()
+    const rail = railOf(scene.doc)
+    const expected = Math.min(44, Math.max(28, String(maxTurn).length * 7 + 10))
+    assert.equal(rail.style['--dsh-tm-rail-collapsed-width'], expected + 'px', maxTurn + ' 位宽')
+    assert.equal(rail.getAttribute('data-collapsed'), '1')
+    const nums = rail.querySelectorAll('.dsh_tm_railnum')
+    assert.deepEqual(nums.map(node => node.textContent), ['1', String(maxTurn)])
+    const ticks = rail.querySelectorAll('.dsh_tm_railtick')
+    assert.equal(ticks.length, 2, '折叠态仍保留刻度')
+    for (const num of nums) {
+      // 假 DOM 没有布局引擎：用公式给出的可用宽度模拟浏览器测量。
+      const needed = String(num.textContent).length * 7
+      num.scrollWidth = needed
+      num.clientWidth = expected - 2 /* tick */ - 2 /* 间距 */ - 4 /* 左右内边距 */
+      assert.ok(num.scrollWidth <= num.clientWidth, `${maxTurn} 轮号不裁切`)
+    }
+    dispose()
+  }
+})
+
 await test('折叠动画期间不做 getComputedStyle；动画结束后恢复', async () => {
   const scene = buildScene()
   const { RAILTAKE, win, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
@@ -840,7 +874,7 @@ await test('折叠条：点击收成 16px 竖条，再点展开；按会话记�
   collapse.dispatchEvent({ type: 'click' })
   assert.equal(rail.getAttribute('data-collapsed'), '1')
   assert.equal(rail.style.width, '200px', '折叠不再改 width，避免逐帧布局')
-  assert.ok(src.includes('clip-path:inset(0 0 0 calc(100% - 16px))'), '折叠用 clip-path 留 16px')
+  assert.ok(src.includes('clip-path:inset(0 0 0 calc(100% - var(--dsh-tm-rail-collapsed-width,28px)))'), '折叠用动态 clip-path')
   assert.equal(store.getItem('dsh.tm.rail.collapsed.s1'), '1', '折叠状态按会话记忆')
   assert.equal(rail.getAttribute('data-tier'), 'normal', '三档宽度语义不变')
 

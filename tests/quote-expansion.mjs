@@ -2,7 +2,7 @@
  * 引用自动展开测试（显示指针、wire 摘要）。
  *
  * 引用只有摘要档：`〔xxxxxxxx#N〕`。自动展开挂在异步
- * `system-prompt/assemble` waterfall 上，注入 `topic-map:引用展开`：
+ * `system-prompt/assemble` waterfall 上，注入 `topic-map:引用摘要`：
  * 有摘要缓存用缓存，没有就现算；失败降级为回答前 400 字并标注。
  *
  * Run: node tests/quote-expansion.mjs
@@ -354,9 +354,9 @@ await test('摘要 ≤400 字、最多 3 个句柄', async () => {
   })
 })
 
-// ── waterfall 接线 ──────────────────────────────────────────────────
+// ── waterfall 接线 / 全局性 / 当前消息 ─────────────────────────────
 
-await test('注册在 system-prompt/assemble waterfall：追加摘要 context', async () => {
+await test('注册在 system-prompt/assemble waterfall：追加摘要 context，且同一 assembly 不重复注入', async () => {
   await withTempHome(async () => {
     const ctx = makeCtx({
       events: { [TARGET_WIRE]: makeEvents([{ prompt: '引用问题', response: '引用回答' }]) },
@@ -365,12 +365,14 @@ await test('注册在 system-prompt/assemble waterfall：追加摘要 context', 
     })
     await syncSessionIndexFor(ctx, TARGET_WIRE)
 
-    let handler = null
+    let assembleHandler = null
+    let claimedHandler = null
     const scope = {
       ...ctx,
       on(name, fn) {
-        assert.equal(name, 'system-prompt/assemble')
-        handler = fn
+        if (name === 'system-prompt/assemble') assembleHandler = fn
+        else if (name === 'agent/inbox/claimed') claimedHandler = fn
+        else throw new Error(`unexpected event ${name}`)
         return () => {}
       },
       effect(fn) {
@@ -384,18 +386,148 @@ await test('注册在 system-prompt/assemble waterfall：追加摘要 context', 
       },
     }
     registerQuoteExpansion(fake)
-    assert.equal(typeof handler, 'function')
+    assert.equal(typeof assembleHandler, 'function')
+    assert.equal(typeof claimedHandler, 'function', '应监听 claimed 消息')
 
     const assembly = { sections: [], contexts: [{ name: 'existing', text: '原有' }], tools: [], variables: {} }
     const agent = makeAgent({ texts: ['〔4c42ff3b#0〕'] })
-    const result = await handler({ ...assembly }, { agent, scope: agent }, async () => assembly)
+    const result = await assembleHandler(assembly, { agent, scope: agent }, async () => assembly)
     assert.equal(result.contexts.length, 2)
-    assert.equal(result.contexts[1].name, 'topic-map:引用展开')
+    assert.equal(result.contexts[1].name, 'topic-map:引用摘要')
     assert.equal(result.contexts[1].interpolate, false)
     assert.ok(result.contexts[1].text.includes('摘要：引用回答的结论。'))
 
-    const untouched = await handler({ ...assembly }, {}, async () => assembly)
+    // 同一个 assembly 第二次进入：不应再追加一层。
+    const again = await assembleHandler(assembly, { agent, scope: agent }, async () => assembly)
+    assert.equal(again.contexts.length, 1, '同一 assembly 只处理一次')
+
+    const untouched = await assembleHandler(
+      { ...assembly },
+      {},
+      async () => ({ ...assembly }),
+    )
     assert.equal(untouched.contexts.length, 1, '没有 agent 时不应注入')
+  })
+})
+
+await test('全局注册：两个不同会话的 assembly 都能注入', async () => {
+  await withTempHome(async () => {
+    const sessions = [TARGET_WIRE, TARGET_DEDUPE]
+    const ctx = makeCtx({
+      events: {
+        [TARGET_WIRE]: makeEvents([{ prompt: '甲', response: '回答甲' }]),
+        [TARGET_DEDUPE]: makeEvents([{ prompt: '乙', response: '回答乙' }]),
+      },
+      sessions,
+      llm: makeFakeLlm({ text: '摘要：跨会话也注入。' }),
+    })
+    await syncSessionIndexFor(ctx, TARGET_WIRE)
+    await syncSessionIndexFor(ctx, TARGET_DEDUPE)
+
+    let assembleHandler = null
+    const scope = {
+      ...ctx,
+      on(name, fn) {
+        if (name === 'system-prompt/assemble') assembleHandler = fn
+        return () => {}
+      },
+      effect(fn) {
+        return fn()
+      },
+    }
+    registerQuoteExpansion({ inject(names, callback) { callback(scope) } })
+
+    const agentA = makeAgent({ id: 'session-aaaa1111-0000-4000-8000-000000000001', texts: ['〔4c42ff3b#0〕'] })
+    const agentB = makeAgent({ id: 'session-bbbb2222-0000-4000-8000-000000000002', texts: ['〔4c42ff37#0〕'] })
+    const assemblyA = { sections: [], contexts: [], tools: [], variables: {} }
+    const assemblyB = { sections: [], contexts: [], tools: [], variables: {} }
+    const resultA = await assembleHandler(assemblyA, { agent: agentA }, async () => assemblyA)
+    const resultB = await assembleHandler(assemblyB, { agent: agentB }, async () => assemblyB)
+    assert.equal(resultA.contexts.length, 1)
+    assert.equal(resultB.contexts.length, 1)
+    assert.ok(resultA.contexts[0].text.includes('摘要：跨会话也注入。'))
+    assert.ok(resultB.contexts[0].text.includes('摘要：跨会话也注入。'))
+    assert.equal(resultA.contexts[0].name, 'topic-map:引用摘要')
+  })
+})
+
+await test('当前会话不在 workspace registry：同会话引用靠内存快照命中', async () => {
+  await withTempHome(async () => {
+    const selfSession = 'session-9999aaaa-1111-4aaa-8bbb-000000000001'
+    const selfEvents = makeEvents([
+      { prompt: '自己之前的轮次', response: '已修复。' },
+    ])
+    const ctx = makeCtx({
+      events: { [selfSession]: selfEvents },
+      workspaces: [], // 故意模拟 /workspaces 里没有 E:\dsh_plugin
+      llm: makeFakeLlm({ text: '摘要：同会话引用命中。' }),
+    })
+    // 当前会话不进索引/工作区，也要能命中。
+    const agent = makeAgent({ id: selfSession, texts: ['回看 〔9999aaaa#0〕'], events: selfEvents })
+    const text = await expandQuoteHandlesForAgent(ctx, agent)
+    assert.ok(text.includes('〔引用摘要 9999aaaa#0〕'), text)
+    assert.ok(text.includes('摘要：同会话引用命中。'), text)
+  })
+})
+
+await test('工作区元数据缺失：用会话目录/索引目录兜底匹配跨会话引用', async () => {
+  await withTempHome(async () => {
+    const ctx = makeCtx({
+      events: { [TARGET_LOG]: makeEvents([{ prompt: '目标轮', response: '目标回答' }]) },
+      workspaces: [],
+      llm: makeFakeLlm({ text: '摘要：会话目录兜底命中。' }),
+    })
+    await syncSessionIndexFor(ctx, TARGET_LOG)
+
+    const agent = makeAgent({ id: 'session-cccc3333-0000-4000-8000-000000000003', texts: ['〔4c42ff38#0〕'] })
+    const text = await expandQuoteHandlesForAgent(ctx, agent)
+    assert.ok(text.includes('〔引用摘要 4c42ff38#0〕'), text)
+    assert.ok(text.includes('摘要：会话目录兜底命中。'))
+  })
+})
+
+await test('当前正在发送的消息：assembly 时从 claimed 缓存取到并注入', async () => {
+  await withTempHome(async () => {
+    const selfSession = 'session-9999aaaa-1111-4aaa-8bbb-000000000001'
+    const selfEvents = makeEvents([{ prompt: '历史问题', response: '历史回答' }])
+    const ctx = makeCtx({
+      events: { [selfSession]: selfEvents },
+      workspaces: [],
+      llm: makeFakeLlm({ text: '摘要：当前消息也能命中。' }),
+    })
+
+    let assembleHandler = null
+    let claimedHandler = null
+    const scope = {
+      ...ctx,
+      on(name, fn) {
+        if (name === 'system-prompt/assemble') assembleHandler = fn
+        else if (name === 'agent/inbox/claimed') claimedHandler = fn
+        return () => {}
+      },
+      effect(fn) {
+        return fn()
+      },
+    }
+    registerQuoteExpansion({ inject(names, callback) { callback(scope) } })
+
+    const agent = makeAgent({ id: selfSession, texts: [], events: selfEvents })
+    const message = {
+      role: 'user',
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: '看这个 〔9999aaaa#0〕' }],
+    }
+    claimedHandler({ agent, message, turn: 1 })
+
+    const assembly = { sections: [], contexts: [], tools: [], variables: {} }
+    const result = await assembleHandler(assembly, { agent }, async () => assembly)
+    assert.equal(result.contexts.length, 1, '当前未落库的消息也必须展开')
+    assert.ok(result.contexts[0].text.includes('〔引用摘要 9999aaaa#0〕'))
+
+    // pending 只消费一次；历史里仍没有句柄，下一次不应重复注入。
+    const next = { sections: [], contexts: [], tools: [], variables: {} }
+    const after = await assembleHandler(next, { agent }, async () => next)
+    assert.equal(after.contexts.length, 0)
   })
 })
 

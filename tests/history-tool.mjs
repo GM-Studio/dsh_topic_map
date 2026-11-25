@@ -302,6 +302,42 @@ await test('带 session- 前缀的完整句柄也能解析', async () => {
   })
 })
 
+await test('同会话引用：当前会话不在 workspace registry 也能命中', async () => {
+  await withTempHome(async () => {
+    const ctx = makeCtx({
+      events: { [SESSION_A]: sampleEvents() },
+      workspaces: [],
+      sessions: [],
+    })
+    await syncSessionIndexFor(ctx, SESSION_A)
+    const tool = createHistoryTurnTool(ctx)
+    const selfAgent = { id: SESSION_A, session: { header: { cwd: 'E:\\ws' } } }
+
+    const result = await run(tool, { handle: '4c42ff36#0' }, selfAgent)
+    assert.equal(result.ok, true, result.error)
+    assert.equal(result.sessionId, SESSION_A)
+    assert.equal(result.turn, 0)
+  })
+})
+
+await test('工作区元数据缺失：用索引目录兜底匹配跨会话引用', async () => {
+  await withTempHome(async () => {
+    const ctx = makeCtx({
+      events: { [SESSION_A]: sampleEvents() },
+      workspaces: [], // 当前会话所属工作区解析不到
+      sessions: [],
+    })
+    await syncSessionIndexFor(ctx, SESSION_A)
+    const tool = createHistoryTurnTool(ctx)
+    const otherAgent = { id: 'session-99998888-0000-4000-8000-000000000001', session: { header: { cwd: 'E:\\ws' } } }
+
+    const result = await run(tool, { handle: '4c42ff36#1' }, otherAgent)
+    assert.equal(result.ok, true, result.error)
+    assert.equal(result.sessionId, SESSION_A)
+    assert.equal(result.turn, 1)
+  })
+})
+
 await test('前缀歧义：明确报歧义并提示用完整 sessionId', async () => {
   await withTempHome(async () => {
     const ctx = makeCtx({

@@ -48,23 +48,25 @@
 
 - [x] ✅ P1-1 标签端点 `/labels` `/label-set` `/label-clear`。`982ad8c`
 - [x] ✅ P1-2 视图模型 `lib/resume-view.js`（三组、主按钮、上限 10）。`9158330`
-- [ ] ⬜ P1-3 分类实体化：稳定 ID + 人工 override，模型只填空白。
-- [ ] ⬜ P1-4 整理动作（A-9）：改名/移动/合并/拆分 + 可撤销。
-- [ ] ⬜ P1-5 线索视图（V-4）。
-- [ ] 🟡 P1-6 统计视图（V-5）：`lib/stats-view.js` 模型已完成，界面未接。
-- [ ] ⬜ P1-7 `workspace-category-*.json` 迁移。
+- [x] ✅ P1-3 分类实体化：`lib/category-store.js` 稳定 id（name+parent 哈希）、人工 override 优先。`72ca1d3`
+- [x] ✅ P1-4 整理动作（A-9）：`lib/organize.js` plan/apply/undo 三段式 + `warnings`。`72ca1d3`
+- [x] ✅ P1-5 线索视图（V-4）：`lib/clue-view.js` + 客户端「线索」页签。`dad7ac5` / `62c2987`
+- [x] ✅ P1-6 统计视图（V-5）：`stats-view` + `stats-format` + 客户端「统计」页签。`8f66613`
+- [ ] ⬜ P1-7 `workspace-category-*.json` 迁移（旧分类文件尚未导入新 store）。
 
 ## P2 — 承接
 
-- [ ] ⬜ P2-1 fork@turn（A-5）：四前置条件 + 血缘 + 标题 + 上限提示。
-- [ ] ⬜ P2-2 重试（A-6）：`fork(该轮之前)` + 重提原 prompt。
-- [ ] ⬜ P2-4 简报（A-8）：模板驱动，生成 Markdown 落盘。
-- [ ] ⬜ P2-5 设置页（V-9）：模板、`digestLevel`、`quoteMaxCount/Chars`、索引状态。
+- [x] ✅ P2-1 fork@turn（A-5）：`atSeq = startSeq - 1`（契约要求 inclusive）。`2064635`
+- [x] ✅ P2-2 重试（A-6）：分叉 + 重提原 prompt，5 分钟去重。`2064635`
+- [x] ✅ P2-4 简报（A-8）：`/brief` 生成 Markdown 落盘，结论复用摘要缓存。`2064635`
+- [x] ✅ P2-5 设置页（V-9）：右栏「设置」页签，四组表单 + 只提交 diff。`8f66613`
 
 ## P3 — 危险写与 agent
 
-- [ ] ⬜ P3-1 变更可视化（A-7）：列表 → hunk → 文件演化史。
-- [ ] ⬜ P3-2 单文件回滚（A-12）：哈希校验、跳过不覆盖、三态报告、可撤销。
+- [x] ✅ P3-1 变更可视化（A-7）：`changes-view` + 详情变更分区（按类型分组）。`dad7ac5` / `62c2987`
+      ⬜ 未做：hunk 级 diff 与文件演化史（需要文件内容快照）。
+- [x] 🟡 P3-2 单文件回滚（A-12）：哈希校验 + 四态**预演**已完成（`997bbd4` / `15f0e02` / `62c2987`）；
+      ⬜ **实际写文件未做**——危险写需单独设计确认与撤销。
 - [x] ✅ P3-3 agent 召回（A-13）：`history_turn` 工具已注册（返回该轮摘要 + `truncated`）。
 
 ## 后期（L2 规模化检索，未排期）

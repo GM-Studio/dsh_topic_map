@@ -59,11 +59,19 @@ const HITS = [
 const COMPONENT_SOURCE = [
   extractFunction(src, 'unrefTimer'),
   extractFunction(src, 'categoryErrorText'),
+  extractFunction(src, 'clueRowNode'),
   extractFunction(src, 'clueRowsOfHits'),
   extractFunction(src, 'clueStatsText'),
   extractFunction(src, 'requestTopicMap'),
   extractFunction(src, 'RightTabStrip'),
   extractFunction(src, 'ClueTabBody'),
+].join('\n')
+
+const TIMELINE_SOURCE = [
+  extractFunction(src, 'clueRowNode'),
+  extractFunction(src, 'clueRowsOfHits'),
+  extractFunction(src, 'clueStatsText'),
+  extractFunction(src, 'HistoryClueTimeline'),
 ].join('\n')
 
 const ERROR_TEXT = error => String(error && error.message ? error.message : error)
@@ -205,6 +213,114 @@ await test('截断可见：命中 N 轮时写明只展示前 M 条', async () =>
   const note = byClass(runtime.tree, 'dsh_tm_cluetruncated')[0]
   assert.ok(note !== undefined)
   assert.equal(textOf(note), '命中 99 轮，只展示前 4 条')
+})
+
+await test('历史页时间线：同一份 hits 走 CLUEVIEW，统计/轮次/跳转都在', async () => {
+  const jumped = []
+  const runtime = await renderComponent(
+    TIMELINE_SOURCE,
+    'HistoryClueTimeline',
+    ['CLUEVIEW', 'HISTORY_EMPTY_TEXT'],
+    [CLUEVIEW, '没有匹配的轮次'],
+    {
+      hits: HITS,
+      keywords: '索引',
+      onJump: function (item) { jumped.push(item) },
+    },
+  )
+  assert.equal(textOf(byClass(runtime.tree, 'dsh_tm_cluestats')[0]), '2 个会话 / 4 轮 / 跨度 2 天')
+  assert.equal(byClass(runtime.tree, 'dsh_tm_cluerow').length, 3)
+  click(byClass(runtime.tree, 'dsh_tm_cluerow')[0])
+  assert.equal(jumped.length, 1)
+  assert.equal(jumped[0].sessionId, 's1')
+  assert.equal(jumped[0].turn, 2)
+})
+
+await test('历史页时间线：空命中显示「没有匹配的轮次」', async () => {
+  const runtime = await renderComponent(
+    TIMELINE_SOURCE,
+    'HistoryClueTimeline',
+    ['CLUEVIEW', 'HISTORY_EMPTY_TEXT'],
+    [CLUEVIEW, '没有匹配的轮次'],
+    { hits: [], keywords: '索引', onJump: function () {} },
+  )
+  assert.equal(textOf(byClass(runtime.tree, 'dsh_tm_history_empty')[0]), '没有匹配的轮次')
+})
+
+await test('历史视图记忆：按工作区读写，坏值回列表', async () => {
+  const memory = new Map()
+  const previous = globalThis.localStorage
+  globalThis.localStorage = {
+    getItem(key) { return memory.has(key) ? memory.get(key) : null },
+    setItem(key, value) { memory.set(key, String(value)) },
+  }
+  try {
+    const built = new Function(
+      'HISTORY_VIEW_PREFIX', 'HISTORY_LIST_VIEW', 'HISTORY_TIMELINE_VIEW',
+      `${extractFunction(src, 'historyViewKey')}
+       ${extractFunction(src, 'readHistoryView')}
+       ${extractFunction(src, 'saveHistoryView')}
+       return { key: historyViewKey, read: readHistoryView, save: saveHistoryView }`,
+    )('dsh.tm.history.view.', 'list', 'timeline')
+    assert.equal(built.key('ws-1'), 'dsh.tm.history.view.ws-1')
+    assert.equal(built.read('ws-1'), 'list', '未写过默认列表')
+    built.save('ws-1', 'timeline')
+    assert.equal(memory.get('dsh.tm.history.view.ws-1'), 'timeline')
+    assert.equal(built.read('ws-1'), 'timeline')
+    memory.set('dsh.tm.history.view.ws-2', 'garbage')
+    assert.equal(built.read('ws-2'), 'list', '坏值不信任')
+  } finally {
+    if (previous === undefined) delete globalThis.localStorage
+    else globalThis.localStorage = previous
+  }
+})
+
+await test('分类:名称 前缀：唯一命中 / 多候选 / 无候选 / 尾随关键词', async () => {
+  const parse = new Function(`${extractFunction(src, 'parseCategoryPrefix')};return parseCategoryPrefix`)()
+  const options = [
+    { id: 'c1', name: '插件开发', path: '技术 › 插件开发' },
+    { id: 'c2', name: '插件测试', path: '技术 › 插件测试' },
+    { id: 'c3', name: '测试', path: '测试' },
+  ]
+  const one = parse('分类:测试 索引', options)
+  assert.equal(one.active, true)
+  assert.equal(one.matched.id, 'c3')
+  assert.equal(one.keywords, '索引')
+
+  const many = parse('分类:插件 ', options)
+  assert.equal(many.matched, null)
+  assert.deepEqual(many.candidates.map(item => item.id), ['c1', 'c2'])
+
+  const none = parse('分类:不存在 索引', options)
+  assert.deepEqual(none.candidates, [])
+  assert.equal(none.keywords, '索引')
+
+  assert.equal(parse('普通关键词', options).active, false)
+})
+
+await test('历史 /search：全部不传 categoryId，未归类传 __none__，分类浏览也发请求', async () => {
+  const fake = makeFetch(() => ({ value: { hits: [], total: 0 } }))
+  const state = { seq: 0 }
+  const seqRef = {
+    get current() { return state.seq },
+    set current(value) { state.seq = value },
+  }
+  const abortRef = { current: null }
+  const requestHistory = new Function(
+    'boundSessionId', 'HISTORY_SEARCH_LIMIT', 'fetch', 'seqRef', 'abortRef', 'cancelHistorySearch',
+    `${extractFunction(src, 'requestHistory')};return requestHistory`,
+  )('s1', 30, fake.fetch, seqRef, abortRef, function () { state.seq += 1; abortRef.current = null })
+
+  await requestHistory({ keywords: '索引', categoryId: '' })
+  await requestHistory({ keywords: '', categoryId: '__none__' })
+  await requestHistory({ keywords: '索引', categoryId: 'c1' })
+
+  assert.equal(fake.calls.length, 3)
+  assert.equal(Object.prototype.hasOwnProperty.call(fake.calls[0].body, 'categoryId'), false, '全部不带 categoryId')
+  assert.deepEqual(fake.calls[0].body, { sessionId: 's1', keywords: '索引', limit: 30 })
+  assert.equal(fake.calls[1].body.keywords, '', '分类浏览态允许空关键词')
+  assert.equal(fake.calls[1].body.categoryId, '__none__')
+  assert.equal(fake.calls[2].body.categoryId, 'c1')
 })
 
 finish()

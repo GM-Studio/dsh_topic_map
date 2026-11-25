@@ -207,6 +207,19 @@ export class HookRuntime {
     this.pendingEffects.push({ index: index, fn: fn })
   }
 
+  useMemo(factory, deps) {
+    const index = this.cursor
+    this.cursor += 1
+    const hook = this.hooks[index]
+    if (hook !== undefined && hook.kind === 'memo' && sameDeps(hook.deps, deps)) return hook.value
+    const record = hook !== undefined && hook.kind === 'memo'
+      ? hook
+      : (this.hooks[index] = { kind: 'memo', deps: undefined, value: undefined })
+    record.value = factory()
+    record.deps = deps === undefined ? undefined : Array.isArray(deps) ? deps.slice() : deps
+    return record.value
+  }
+
   async settle(maxRounds) {
     const limit = maxRounds === undefined ? 16 : maxRounds
     this.renderOnce()
@@ -264,13 +277,14 @@ function sameDeps(left, right) {
  */
 export async function renderComponent(source, name, depNames, deps, props) {
   const runtime = new HookRuntime()
-  const params = ['h', 'React', 'useState', 'useRef', 'useEffect'].concat(depNames || [])
+  const params = ['h', 'React', 'useState', 'useRef', 'useEffect', 'useMemo'].concat(depNames || [])
   const values = [
     h,
     React,
     runtime.useState.bind(runtime),
     runtime.useRef.bind(runtime),
     runtime.useEffect.bind(runtime),
+    runtime.useMemo.bind(runtime),
   ].concat((deps || []).map(dep => dep))
   // eslint-disable-next-line no-new-func
   const component = new Function(...params, `${source}\n;return ${name}`)(...values)

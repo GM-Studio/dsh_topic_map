@@ -328,6 +328,127 @@ test('重命名 plan 应用与 undo', () => {
   assert.deepEqual(undoOrganize(applied.store, applied.undo).store, before)
 })
 
+// ── 3 级深度上限 ─────────────────────────────────────────────────
+
+/** 用公开 API 建一条合法三级链：c-l1 → c-l2 → c-l3。 */
+function chain3() {
+  let store = emptyStore()
+  for (const [id, name, parentId] of [
+    ['c-l1', '一级', null],
+    ['c-l2', '二级', 'c-l1'],
+    ['c-l3', '三级', 'c-l2'],
+  ]) {
+    const r = upsertCategory(store, { id, name, parentId, source: 'user' })
+    assert.equal(r.error, undefined)
+    store = r.store
+  }
+  return store
+}
+
+/** 在三级链之外再建一棵独立的、深度为 3 的树（c-r2 → c-r2b → c-r2c）。 */
+function chain3WithOther() {
+  let store = chain3()
+  for (const [id, name, parentId] of [
+    ['c-r2', '另一棵', null],
+    ['c-r2b', '另一棵二级', 'c-r2'],
+    ['c-r2c', '另一棵三级', 'c-r2b'],
+  ]) {
+    const r = upsertCategory(store, { id, name, parentId, source: 'user' })
+    assert.equal(r.error, undefined)
+    store = r.store
+  }
+  return store
+}
+
+test('planOrganize 新建第 4 级返回「分类最多 3 级」', () => {
+  const store = chain3()
+  const before = clone(store)
+  for (const op of [
+    { kind: 'upsert', name: '第四级', parentId: 'c-l3' },
+    { kind: 'upsert', id: 'c-x4', name: '第四级', parentId: 'c-l3' },
+  ]) {
+    const r = planOrganize(store, op)
+    assert.equal(r.error, '分类最多 3 级')
+    assert.equal(r.plan, null)
+  }
+  assert.deepEqual(store, before, 'planOrganize 必须是纯计算')
+})
+
+test('planOrganize 把叶子或子树移动到第 4 级被拒', () => {
+  const store = chain3WithOther()
+  const before = clone(store)
+  for (const op of [
+    { kind: 'move', id: 'c-l3', parentId: 'c-r2c' },
+    { kind: 'move', id: 'c-l2', parentId: 'c-r2c' },
+    { kind: 'upsert', id: 'c-l2', name: '二级', parentId: 'c-r2c' },
+  ]) {
+    const r = planOrganize(store, op)
+    assert.equal(r.error, '分类最多 3 级')
+    assert.equal(r.plan, null)
+  }
+  assert.deepEqual(store, before)
+})
+
+test('applyPlan 对手工 plan 也执行深度校验，store 不变', () => {
+  const store = chain3WithOther()
+  const before = clone(store)
+  const applied = applyPlan(store, {
+    version: 1,
+    kind: 'move',
+    action: 'move',
+    source: 'user',
+    id: 'c-l3',
+    parentId: 'c-r2c',
+  })
+  assert.equal(applied.error, '分类最多 3 级')
+  assert.deepEqual(applied.store, before)
+  assert.equal(applied.undo.kind, 'noop')
+})
+
+test('合法的三级 upsert / move plan 可应用且 undo 完整还原', () => {
+  const store = chain3()
+  const before = clone(store)
+
+  const upsertPlan = planOrganize(store, {
+    kind: 'upsert',
+    id: 'c-l3b',
+    name: '同级第三级',
+    parentId: 'c-l2',
+  }).plan
+  assert.ok(upsertPlan, '第 3 级新建应当合法')
+  const upserted = applyPlan(store, upsertPlan)
+  assert.equal(upserted.error, undefined)
+  assert.equal(find(upserted.store, 'c-l3b').parentId, 'c-l2')
+  assert.deepEqual(undoOrganize(upserted.store, upserted.undo).store, before)
+
+  const movePlan = planOrganize(store, { kind: 'move', id: 'c-l3', parentId: null }).plan
+  assert.ok(movePlan, '第 3 级上移到顶层应当合法')
+  const moved = applyPlan(store, movePlan)
+  assert.equal(moved.error, undefined)
+  assert.equal(find(moved.store, 'c-l3').parentId, null)
+  assert.deepEqual(undoOrganize(moved.store, moved.undo).store, before)
+})
+
+test('planOrganize 合并出第 4 级时返回错误', () => {
+  let store = emptyStore()
+  for (const [id, name, parentId] of [
+    ['c-p', '父', null],
+    ['c-target', '目标', 'c-p'],
+    ['c-other', '另一棵', null],
+    ['c-o1', '另一棵子', 'c-other'],
+    ['c-o2', '另一棵孙', 'c-o1'],
+  ]) {
+    const r = upsertCategory(store, { id, name, parentId, source: 'user' })
+    assert.equal(r.error, undefined)
+    store = r.store
+  }
+  const before = clone(store)
+  const r = planOrganize(store, { kind: 'merge', ids: ['c-target', 'c-other'], name: '合并' })
+  assert.equal(r.error, '分类最多 3 级')
+  assert.equal(r.plan, null)
+  assert.deepEqual(store, before)
+})
+
 // ── 非法输入、纯净性、describeUndo ───────────────────────────────
 
 test('非法 op 返回错误且不抛异常', () => {

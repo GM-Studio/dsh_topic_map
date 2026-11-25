@@ -416,6 +416,217 @@ test('splitCategory 目标不存在时整体失败，不改状态', () => {
   assert.deepEqual(r.store, before)
 })
 
+// ── 3 级深度上限与孤儿归一 ────────────────────────────────────────
+
+/** 用公开 API 建一条合法链；levels=3 是允许的最深层。 */
+function chainStore(levels) {
+  let store = emptyStore()
+  const ids = []
+  let parentId = null
+  for (let level = 1; level <= levels; level += 1) {
+    const id = `c-l${level}`
+    const r = upsertCategory(store, { id, name: `第 ${level} 级`, parentId, source: 'user' })
+    assert.equal(r.error, undefined, `第 ${level} 级应当允许创建`)
+    store = r.store
+    ids.push(id)
+    parentId = id
+  }
+  return { store, ids }
+}
+
+/** 直接构造历史遗留的深层脏数据（绕过写接口）。 */
+function dirtyChain(levels) {
+  const categories = []
+  for (let level = 1; level <= levels; level += 1) {
+    categories.push({
+      id: `c-d${level}`,
+      name: `脏第 ${level} 级`,
+      parentId: level === 1 ? null : `c-d${level - 1}`,
+      source: 'user',
+    })
+  }
+  return { version: 1, categories, assignments: {} }
+}
+
+/** 树的最大实际深度（根 = 1）。 */
+function maxTreeDepth(tree) {
+  let max = 0
+  const walk = (nodes, depth) => {
+    for (const node of Array.isArray(nodes) ? nodes : []) {
+      max = Math.max(max, depth)
+      walk(node.children, depth + 1)
+    }
+  }
+  walk(tree, 1)
+  return max
+}
+
+test('upsertCategory 在第三级下新建返回「分类最多 3 级」，store 不变', () => {
+  const { store } = chainStore(3)
+  const before = clone(store)
+  for (const input of [
+    { id: 'c-l4', name: '第 4 级', parentId: 'c-l3' },
+    { name: '自动 id 第 4 级', parentId: 'c-l3' },
+  ]) {
+    const r = upsertCategory(store, input)
+    assert.equal(r.error, '分类最多 3 级')
+    assert.equal(r.id, undefined)
+    assert.deepEqual(r.store, before, '拒绝时 store 必须原样返回')
+  }
+  assert.deepEqual(store, before, '不得修改入参')
+  assert.equal(store.categories.length, 3)
+})
+
+test('合法三级仍可创建与挂载，第四级才被拒', () => {
+  const { store, ids } = chainStore(3)
+  assert.deepEqual(ids, ['c-l1', 'c-l2', 'c-l3'])
+  assert.equal(maxTreeDepth(toTree(store)), 3)
+
+  const third = upsertCategory(store, { id: 'c-l3b', name: '第三个同级', parentId: 'c-l2' })
+  assert.equal(third.error, undefined)
+  assert.equal(find(third.store, 'c-l3b').parentId, 'c-l2')
+  assert.equal(maxTreeDepth(toTree(third.store)), 3)
+
+  const deeper = upsertCategory(third.store, { id: 'c-l4', name: '第 4 级', parentId: 'c-l3b' })
+  assert.equal(deeper.error, '分类最多 3 级')
+})
+
+test('moveCategory 把叶子或子树移到第三级之下会被拒绝，store 不变', () => {
+  let store = chainStore(3).store
+  store = upsertCategory(store, { id: 'c-r2', name: '另一棵树', parentId: null }).store
+  store = upsertCategory(store, { id: 'c-r2b', name: '另一棵二级', parentId: 'c-r2' }).store
+  store = upsertCategory(store, { id: 'c-r2c', name: '另一棵三级', parentId: 'c-r2b' }).store
+  const before = clone(store)
+
+  const leaf = moveCategory(store, 'c-l3', 'c-r2c')
+  assert.equal(leaf.error, '分类最多 3 级', '叶子挂到第 3 级下会变成第 4 级')
+  assert.deepEqual(leaf.store, before)
+
+  const subtree = moveCategory(store, 'c-l2', 'c-r2c')
+  assert.equal(subtree.error, '分类最多 3 级', '带子树的节点整体下移更不允许')
+  assert.deepEqual(subtree.store, before)
+  assert.equal(find(subtree.store, 'c-l2').parentId, 'c-l1')
+  assert.equal(find(subtree.store, 'c-l3').parentId, 'c-l2')
+})
+
+test('三级以内的移动仍被允许', () => {
+  let store = chainStore(3).store
+  store = upsertCategory(store, { id: 'c-r2', name: '另一棵树', parentId: null }).store
+  store = upsertCategory(store, { id: 'c-r2b', name: '另一棵二级', parentId: 'c-r2' }).store
+
+  const leaf = moveCategory(store, 'c-l3', 'c-r2b')
+  assert.equal(leaf.error, undefined, '第 3 级叶子挂到第 2 级父级下仍是第 3 级')
+  assert.equal(find(leaf.store, 'c-l3').parentId, 'c-r2b')
+  assert.equal(maxTreeDepth(toTree(leaf.store)), 3)
+
+  const root = moveCategory(leaf.store, 'c-l1', 'c-r2')
+  assert.equal(root.error, undefined, '子树整体挂到第 1 级下最深到第 3 级')
+  assert.equal(find(root.store, 'c-l1').parentId, 'c-r2')
+  assert.equal(maxTreeDepth(toTree(root.store)), 3)
+})
+
+test('upsert 把已有的两级子树改挂到第 2 级下会被拒绝', () => {
+  let store = chainStore(3).store
+  store = upsertCategory(store, { id: 'c-r2', name: '另一棵树', parentId: null }).store
+  store = upsertCategory(store, { id: 'c-r2b', name: '另一棵二级', parentId: 'c-r2' }).store
+  const before = clone(store)
+  // c-l1 的子树高 2（c-l1 → c-l2），挂到第 2 级下会让 c-l2 变成第 4 级。
+  const r = upsertCategory(store, { id: 'c-l1', name: '第 1 级', parentId: 'c-r2b' })
+  assert.equal(r.error, '分类最多 3 级')
+  assert.deepEqual(r.store, before)
+})
+
+test('upsert 与 move 都拒绝自引用 / 后代成环（三级数据上）', () => {
+  const { store } = chainStore(3)
+  const before = clone(store)
+  for (const input of [
+    { id: 'c-l2', name: '第二级', parentId: 'c-l2' },
+    { id: 'c-l1', name: '第一级', parentId: 'c-l3' },
+  ]) {
+    const r = upsertCategory(store, input)
+    assert.ok(r.error, `parentId=${input.parentId} 应被拒绝`)
+    assert.deepEqual(r.store, before)
+  }
+  assert.ok(moveCategory(store, 'c-l1', 'c-l3').error, '不能挂到自己的后代下')
+  assert.ok(moveCategory(store, 'c-l2', 'c-l2').error, '不能挂到自己下面')
+})
+
+test('孤儿 parentId 归一为 null：按顶级显示，不留悬空引用', () => {
+  const dirty = {
+    version: 1,
+    categories: [
+      { id: 'c-a', name: '没有父级', parentId: 'c-missing', source: 'user' },
+      { id: 'c-b', name: '子级', parentId: 'c-a', source: 'user' },
+    ],
+    assignments: { s1: { categoryId: 'c-a', source: 'user' } },
+  }
+  const tree = toTree(dirty)
+  assert.equal(tree.length, 1, '孤儿应显示为根')
+  assert.equal(tree[0].id, 'c-a')
+  assert.equal(tree[0].children[0].id, 'c-b')
+
+  const written = upsertCategory(dirty, { id: 'c-x', name: '新分类', parentId: null })
+  assert.equal(written.error, undefined)
+  assert.equal(find(written.store, 'c-a').parentId, null, '悬空 parentId 必须归一为 null')
+  const ids = new Set(written.store.categories.map(c => c.id))
+  for (const category of written.store.categories) {
+    if (category.parentId !== null) assert.ok(ids.has(category.parentId), '不能留悬空引用')
+  }
+})
+
+test('applyModelFill 把指向不存在父级的提案按顶级落库', () => {
+  const r = applyModelFill(emptyStore(), [
+    { id: 'c-orphan', name: '孤儿提案', parentId: 'c-not-proposed' },
+  ])
+  assert.equal(r.added, 1)
+  assert.equal(find(r.store, 'c-orphan').parentId, null)
+})
+
+test('toTree 把第 4 级及更深节点上提到第 3 级，并给出 warnings', () => {
+  const dirty = dirtyChain(5)
+  const tree = toTree(dirty)
+  assert.ok(Array.isArray(tree), 'toTree 仍返回数组，兼容既有调用方')
+  assert.equal(maxTreeDepth(tree), 3, '输出树不得超过 3 层')
+  const nodes = flatten(tree)
+  assert.equal(nodes.length, 5, '上提不能丢分类')
+  assert.equal(tree[0].children[0].children.length, 3, '第 3、4、5 级都并到第 2 级下（第 3 层）')
+  assert.deepEqual(Array.from(tree.warnings), ['2 个分类超出 3 级，已上提'])
+
+  const clean = chainStore(3).store
+  assert.equal(maxTreeDepth(toTree(clean)), 3)
+  assert.deepEqual(Array.from(toTree(clean).warnings), [])
+})
+
+test('mergeCategories 若会把子树压到第 4 级则整体拒绝', () => {
+  let store = emptyStore()
+  store = upsertCategory(store, { id: 'c-p', name: '父', parentId: null }).store
+  store = upsertCategory(store, { id: 'c-target', name: '目标', parentId: 'c-p' }).store
+  store = upsertCategory(store, { id: 'c-other', name: '另一棵', parentId: null }).store
+  store = upsertCategory(store, { id: 'c-o1', name: '另一棵子', parentId: 'c-other' }).store
+  store = upsertCategory(store, { id: 'c-o2', name: '另一棵孙', parentId: 'c-o1' }).store
+  const before = clone(store)
+
+  const r = mergeCategories(store, ['c-target', 'c-other'], '合并', 'user')
+  assert.equal(r.error, '分类最多 3 级')
+  assert.equal(r.undo, undefined)
+  assert.deepEqual(r.store, before)
+  assert.deepEqual(store, before, '不得修改入参')
+})
+
+test('applyModelFill 不得间接产生第 4 级分类', () => {
+  const r = applyModelFill(emptyStore(), [
+    { id: 'c-p', name: '一级' },
+    { id: 'c-a', name: '二级', parentId: 'c-p' },
+    { id: 'c-b', name: '三级', parentId: 'c-a' },
+    { id: 'c-c', name: '提案的第四级', parentId: 'c-b' },
+  ])
+  assert.equal(r.added, 4)
+  assert.equal(find(r.store, 'c-a').parentId, 'c-p')
+  assert.equal(find(r.store, 'c-b').parentId, 'c-a')
+  assert.equal(find(r.store, 'c-c').parentId, null, '超深提案按顶级落库，不得越过 3 级')
+  assert.equal(maxTreeDepth(toTree(r.store)), 3)
+})
+
 // ── 异常输入与纯净性 ──────────────────────────────────────────────
 
 test('非法输入不抛异常', () => {

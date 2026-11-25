@@ -6,7 +6,8 @@
 ## F — 索引（事实层）
 
 - **F-1 每轮一条记录，存全文。**
-  字段：`turn, seq, start, end, ms, prompt, response, tools[], files[], commands[], usage{}, model, endReason, interrupted, steps`。
+  字段：`turn, seq, endSeq, start, end, ms, prompt, response, tools[], files[], commands[], usage{}, model, endReason, interrupted, steps`。
+  `endSeq` 是该轮 `turn/end` 事件的 seq（未终结为 `null`），摘要缓存以它为键。
   `commands` 抽取规则：`command/cmd/script` 直取；`code` **仅 shell 类工具**（shell/bash/terminal/exec/powershell/cmd，
   含 `run_shell` 这类分词）直取，其它工具只**解包** `command:` 后的字符串字面量（双/单/反引号，还原 `\n`）；
   **解析失败为空，绝不回退整段 JS**；一次 tool/call 只取第一条；每轮上限 8 条、单条 500 字、按序去重。

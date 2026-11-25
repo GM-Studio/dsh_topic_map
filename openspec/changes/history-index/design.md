@@ -22,7 +22,7 @@
 轮次行：
 
 ```json
-{"turn":37,"seq":812,"start":1793000000000,"end":1793000060000,"ms":60000,
+{"turn":37,"seq":812,"endSeq":840,"start":1793000000000,"end":1793000060000,"ms":60000,
  "prompt":"…全文…","response":"…全文…","tools":["edit"],"files":["lib/client.js"],"commands":["node scripts/test-all.mjs"],
  "usage":{"input":13700,"output":3300,"cacheRead":0,"cacheWrite":0,"reasoning":0},
  "model":"deepseek-v4","endReason":"completed","interrupted":false,"steps":12,
@@ -174,9 +174,11 @@ description 里写明句柄格式，模型看到 `〔…#N〕` 才知道要调�
 **显示层短、wire 层够**：用户只看到 `@第33轮对话〔4c42ff36#33〕`，模型拿到的是该轮**摘要**（≤400 字）。
 
 摘要由 `POST /turn-digest {sessionId, turn, force?}` 生成：缓存 `~/.dsh/topic-map/digests/<sessionId>#<turn>.json`
-（形状 `{revision, summary, model, at}`），`revision` 变或 `force` 才重算；提示词明确"保留结论/关键决定/命令/文件，
-不复述过程"。**摘要调用必须与归类共用 `resolveRoute` + `askOnce`**——`askOnce` 的 `limits` 要带 `sessionId`，
-否则 opencode 适配器会 400 MissingSessionID（真机踩过）。
+（形状 `{revision, endSeq, summary, model, at}`）。**命中只看 `endSeq`**——轮次一旦结束内容就不再变，
+会话 `revision` 只作诊断（活会话每来一条新消息 revision 都会变，拿它当缓存键会导致每轮重算，真机踩过）。
+未完成轮（`endSeq:null`）照常生成但不缓存；`force` 绕过缓存。
+提示词明确"保留结论/关键决定/命令/文件，不复述过程"。**摘要调用必须与归类共用 `resolveRoute` + `askOnce`**——
+`askOnce` 的 `limits` 要带 `sessionId`，否则 opencode 适配器会 400 MissingSessionID（真机踩过）。
 
 两条通道：
 

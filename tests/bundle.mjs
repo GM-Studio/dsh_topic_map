@@ -146,6 +146,64 @@ test('CITE 嵌入后能真实执行（引用块与预算）', () => {
   })
 })
 
+// ── V-12：rail-view 嵌入段 ───────────────────────────────────────────
+//
+// rail-view 没有接进 scripts/build-theme.mjs（那是另一个 agent 的文件），
+// 所以这一段是手工嵌入的。手工嵌入最大的风险是「改了 lib 忘了同步」，
+// 于是这里做**逐字节**校验：嵌入段必须等于 lib/rail-view.js 按同一规则
+// 去掉模块声明与 export 关键字后的原文。
+
+test('RAILVIEW 嵌入段存在（V-12 历史轨）', () => {
+  assert.ok(moduleBlock('RAILVIEW') !== null, 'client.js 里找不到 RAILVIEW 嵌入段')
+  assert.ok(src.includes('lib/rail-view.js 原样嵌入'), '缺少嵌入段说明注释')
+})
+
+test('RAILVIEW 嵌入段与 lib/rail-view.js 逐字节一致', () => {
+  const source = readFileSync(join(root, 'lib', 'rail-view.js'), 'utf8')
+  const stripped = source
+    .replace(/^\/\*\*[\s\S]*?\*\/\s*/m, '')
+    .replace(/^export const /gm, 'var ')
+    .replace(/^export function /gm, 'function ')
+    .replace(/^import .*$/gm, '')
+    .replace(/\s+$/, '')
+  const indented = stripped.split('\n').map(line => (line === '' ? '' : '  ' + line)).join('\n')
+  const block = moduleBlock('RAILVIEW')
+  assert.ok(block !== null)
+  assert.ok(block.includes(indented),
+    '嵌入段与源码不一致：改 lib/rail-view.js 后必须同步 client.js 的 RAILVIEW 段')
+})
+
+test('RAILVIEW 嵌入后能真实执行，且导出覆盖接管层的全部 view.* 调用', () => {
+  const RAILVIEW = evalEmbedded('RAILVIEW')
+  for (const name of ['tierOf', 'snapWidth', 'turnOfLabel', 'rowsOf', 'activeIndexOf', 'anchorFor', 'selfCheck']) {
+    assert.equal(typeof RAILVIEW[name], 'function', `RAILVIEW.${name} 必须是函数，否则运行时白屏`)
+  }
+  assert.equal(RAILVIEW.TIER_WIDTHS.hair, 40)
+  assert.equal(RAILVIEW.tierOf(40), 'hair')
+  assert.deepEqual(
+    RAILVIEW.rowsOf([{ dataIndex: '0', ariaLabel: '跳转到第 7 轮' }]).map(row => row.turn),
+    [7],
+    '嵌入后的解析逻辑应真实可用',
+  )
+
+  // 接管层只用 `view.xxx` 访问嵌入模块；清单漏一个就是运行时 TypeError。
+  const start = src.indexOf('var RAILTAKE = (function ()')
+  assert.ok(start >= 0, '找不到 RAILTAKE 段')
+  const end = src.indexOf('\n    })()', start)
+  assert.ok(end >= 0, 'RAILTAKE 段没有闭合')
+  const takeover = src.slice(start, end)
+  const used = [...new Set([...takeover.matchAll(/\bview\.([A-Za-z_$][\w$]*)/g)].map(m => m[1]))]
+  assert.ok(used.length > 0, '接管层没有调用 view.*？')
+  for (const name of used) {
+    assert.ok(name in RAILVIEW, `接管层用到 view.${name}，但 RAILVIEW 没有导出`)
+  }
+})
+
+test('接管层已接进 apply（不是写完忘了挂）', () => {
+  assert.ok(src.includes("dsh-topic-map: 历史轨接管"), 'apply 里没有启动历史轨接管')
+  assert.ok(src.includes('RAILTAKE.start({'), 'apply 里没有调用 RAILTAKE.start')
+})
+
 console.log(`\n${passed} passed, ${failures.length} failed`)
 if (failures.length > 0) {
   for (const f of failures) console.error(`\n${f.name}\n${f.error.stack}`)

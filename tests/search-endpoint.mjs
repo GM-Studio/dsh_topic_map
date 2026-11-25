@@ -12,7 +12,13 @@ import { strict as assert } from 'node:assert'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { flushIndexSyncs, reindexWorkspace, searchWorkspaceIndex, syncSessionIndexFor } from '../lib/index.js'
+import {
+  flushIndexSyncs,
+  listSessionCommands,
+  reindexWorkspace,
+  searchWorkspaceIndex,
+  syncSessionIndexFor,
+} from '../lib/index.js'
 import { defaultSessionsDir, indexFilePath, readIndexFile } from '../lib/turn-index.js'
 
 let passed = 0
@@ -164,18 +170,36 @@ await test('索引可用：命中带上 sessionId/title，按会话分组不塌'
   })
 })
 
-await test('命中带 commandCount（schema 2；分组时组上给总数）', async () => {
+await test('命中计数 = markdown 代码块数（tool 命令不参与；分组给合计）', async () => {
   await withTempHome(async () => {
+    const twoBlocks = [
+      '结论如下。',
+      '```bash',
+      'npm test',
+      '```',
+      '```js',
+      'console.log(1)',
+      '```',
+    ].join('\n')
     const events = {
       'sess-cmd': makeEvents([
         {
           prompt: '跑命令 关键词',
+          response: twoBlocks,
           calls: [
             { name: 'run_code', args: { command: 'npm test' } },
             { name: 'run_code', args: { command: 'npm run build' } },
+            { name: 'run_code', args: { command: 'git status' } },
           ],
         },
-        { prompt: '没命令 关键词' },
+        {
+          prompt: '没代码块 关键词',
+          response: '这一轮只有普通回答',
+          calls: [
+            { name: 'run_code', args: { command: 'echo 1' } },
+            { name: 'run_code', args: { command: 'echo 2' } },
+          ],
+        },
       ]),
       'sess-nocmd': makeEvents([{ prompt: '关键词 无命令' }]),
     }
@@ -189,12 +213,14 @@ await test('命中带 commandCount（schema 2；分组时组上给总数）', as
       limit: 10,
       now: BASE_TIME + 10_000,
     })
-    const withCommands = flat.hits.find(hit => hit.sessionId === 'sess-cmd' && hit.turn === 0)
-    assert.equal(withCommands.commandCount, 2)
-    const withoutCommands = flat.hits.find(hit => hit.sessionId === 'sess-cmd' && hit.turn === 1)
-    assert.equal(withoutCommands.commandCount, 0)
+    const blockTurn = flat.hits.find(hit => hit.sessionId === 'sess-cmd' && hit.turn === 0)
+    assert.equal(blockTurn.blockCount, 2, '两个围栏块')
+    assert.equal(blockTurn.commandCount, 2, 'commandCount 是 blockCount 的别名')
+    const toolOnlyTurn = flat.hits.find(hit => hit.sessionId === 'sess-cmd' && hit.turn === 1)
+    assert.equal(toolOnlyTurn.blockCount, 0, 'tool 命令再多也不计入')
+    assert.equal(toolOnlyTurn.commandCount, 0)
     const other = flat.hits.find(hit => hit.sessionId === 'sess-nocmd')
-    assert.equal(other.commandCount, 0)
+    assert.equal(other.blockCount, 0)
 
     const grouped = await searchWorkspaceIndex(ctx, {
       workspaceId: 'ws-1',
@@ -205,9 +231,86 @@ await test('命中带 commandCount（schema 2；分组时组上给总数）', as
     })
     const group = grouped.hits.find(item => item.sessionId === 'sess-cmd')
     assert.ok(Array.isArray(group.hits))
-    assert.equal(group.hits.find(hit => hit.turn === 0).commandCount, 2)
-    assert.equal(group.hits.find(hit => hit.turn === 1).commandCount, 0)
-    assert.equal(group.commandCount, 2, '分组上应是组内命令总数')
+    assert.equal(group.hits.find(hit => hit.turn === 0).blockCount, 2)
+    assert.equal(group.hits.find(hit => hit.turn === 1).blockCount, 0)
+    assert.equal(group.blockCount, 2, '分组上应是组内代码块合计')
+    assert.equal(group.commandCount, 2)
+  })
+})
+
+await test('tool 命令变化不改变计数；只有代码块变化才改变', async () => {
+  await withTempHome(async () => {
+    const oneBlock = ['```bash', 'npm test', '```'].join('\n')
+    const twoBlocks = ['```bash', 'a', '```', '```js', 'b', '```'].join('\n')
+    const events = {
+      'sess-tool-0': makeEvents([{ prompt: '计数 关键词', response: oneBlock, calls: [] }]),
+      'sess-tool-3': makeEvents([{
+        prompt: '计数 关键词',
+        response: oneBlock,
+        calls: [
+          { name: 'run_code', args: { command: 'a' } },
+          { name: 'run_code', args: { command: 'b' } },
+          { name: 'run_code', args: { command: 'c' } },
+        ],
+      }]),
+      'sess-block-0': makeEvents([{
+        prompt: '计数 关键词',
+        response: '纯文字',
+        calls: [{ name: 'run_code', args: { command: 'a' } }, { name: 'run_code', args: { command: 'b' } }],
+      }]),
+      'sess-block-2': makeEvents([{
+        prompt: '计数 关键词',
+        response: twoBlocks,
+        calls: [{ name: 'run_code', args: { command: 'a' } }, { name: 'run_code', args: { command: 'b' } }],
+      }]),
+    }
+    const { ctx } = makeCtx({ events })
+    for (const id of Object.keys(events)) await syncSessionIndexFor(ctx, id)
+
+    const result = await searchWorkspaceIndex(ctx, {
+      workspaceId: 'ws-1',
+      keywords: '关键词',
+      limit: 20,
+      now: BASE_TIME + 10_000,
+    })
+    const countOf = id => result.hits.find(hit => hit.sessionId === id)?.blockCount
+    assert.equal(countOf('sess-tool-0'), 1)
+    assert.equal(countOf('sess-tool-3'), 1, 'tool 命令从 0 变 3，计数必须不变')
+    assert.equal(countOf('sess-block-0'), 0)
+    assert.equal(countOf('sess-block-2'), 2, '代码块从 0 变 2，计数才变')
+  })
+})
+
+await test('/search 计数与 /session-commands total 一致（同会话、无筛选）', async () => {
+  await withTempHome(async () => {
+    const events = {
+      'sess-consistency': makeEvents([
+        {
+          prompt: '一致性 关键词',
+          response: ['```bash', 'npm test', '```', '```', 'plain', '```'].join('\n'),
+          calls: [{ name: 'run_code', args: { command: 'ignored' } }],
+        },
+        {
+          prompt: '一致性 关键词 第二',
+          response: '没有块',
+          calls: [{ name: 'run_code', args: { command: 'ignored-2' } }],
+        },
+      ]),
+    }
+    const { ctx } = makeCtx({ events, sessions: ['sess-consistency'] })
+    await syncSessionIndexFor(ctx, 'sess-consistency')
+
+    const search = await searchWorkspaceIndex(ctx, {
+      workspaceId: 'ws-1',
+      keywords: '一致性',
+      limit: 100,
+      now: BASE_TIME + 10_000,
+    })
+    const searchTotal = search.hits.reduce((sum, hit) => sum + (hit.blockCount ?? 0), 0)
+    const commands = await listSessionCommands(ctx, { sessionId: 'sess-consistency' })
+    assert.equal(commands.ok, true, commands.error)
+    assert.equal(searchTotal, commands.value.total, '同一会话无筛选时两边计数必须一致')
+    assert.equal(searchTotal, 2)
   })
 })
 

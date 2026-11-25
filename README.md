@@ -148,7 +148,9 @@ Host 半只提供 `/api/topic-map/*` 的一组端点。面板**不碰你的对�
 | `POST /sessions` | 某工作区的会话清单 |
 | `POST /categorize` | 工作区归类树（带缓存，可 `force`） |
 | `POST /overview` | 工作区概览 |
-| `POST /find` | 跨会话正文检索 |
+| `POST /find` | 跨会话正文检索（索引优先、缺失回退预览，每会话一条） |
+| `POST /search` | 跨会话**轮次级**检索：相关度排序、分组、截断；返回 `hits/total/truncated/scanned/indexed/elapsedMs` |
+| `POST /index-build` | 索引维护：按会话或工作区重建（完整校验，可自愈） |
 | `POST /analyze` | 精化分段（2 步，产出待确认预览） |
 | `POST /progress` `POST /cancel-analyze` | 进度轮询 / 取消 |
 | `POST /apply-semantic` `POST /revert-semantic` | 采纳 / 回退精化结果 |

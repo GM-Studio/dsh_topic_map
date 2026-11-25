@@ -150,6 +150,7 @@ Host 半只提供 `/api/topic-map/*` 的一组端点。面板**不碰你的对�
 | `POST /overview` | 工作区概览 |
 | `POST /find` | 跨会话正文检索（索引优先、缺失回退预览，每会话一条） |
 | `POST /search` | 跨会话**轮次级**检索：相关度排序、分组、截断；返回 `hits/total/truncated/scanned/indexed/elapsedMs` |
+| `POST /turn-detail` | 单轮详情：完整问答、用量、文件变更 + 前后邻居 + 标签（索引命中约 0.5ms） |
 | `POST /index-build` | 索引维护：按会话或工作区重建（完整校验，可自愈） |
 | `POST /labels` | 标签读取：工作区全量，或按 `sessionId+turn` 取单条（同一 map 形状） |
 | `POST /label-set` | 标签写入：`followUp/solved/starred/note` 合并写，`source` 固定 user |

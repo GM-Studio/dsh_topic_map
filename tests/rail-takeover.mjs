@@ -239,7 +239,9 @@ function collect(roots, selector) {
 class FakeDocument {
   constructor() {
     this.listeners = new Map()
+    this.head = new FakeElement('head', this)
     this.body = new FakeElement('body', this)
+    this.head.ownerDocument = this
     this.body.ownerDocument = this
   }
 
@@ -275,10 +277,12 @@ class FakeDocument {
 }
 
 /** 假 window：定时器队列 + getComputedStyle + 存储 + 可触发的 MutationObserver。 */
-function makeWindow(store) {
+function makeWindow(store, settings) {
+  const options = settings || {}
   const timers = []
   const observers = []
   let nextId = 1
+  let computedStyleCalls = 0
   class FakeObserver {
     constructor(callback) {
       this.callback = callback
@@ -322,7 +326,19 @@ function makeWindow(store) {
         if (observer.connected && observer.target === target) observer.callback(records)
       }
     },
-    getComputedStyle() { return { right: '12px', top: '300px', maxHeight: '420px' } },
+    getComputedStyle(element) {
+      computedStyleCalls += 1
+      let visibility = 'visible'
+      if (element !== null && element !== undefined && typeof element.getAttribute === 'function'
+        && element.getAttribute('data-dsh-tm-native') === 'hidden') {
+        visibility = 'hidden'
+      }
+      if (element !== null && element !== undefined && element.style !== undefined
+        && element.style.visibility === 'hidden') visibility = 'hidden'
+      if (options.nativeNeverHidden === true) visibility = 'visible'
+      return { right: '12px', top: '300px', maxHeight: '420px', visibility }
+    },
+    getComputedStyleCalls() { return computedStyleCalls },
     addEventListener() {},
     removeEventListener() {},
     MutationObserver: FakeObserver,
@@ -392,7 +408,7 @@ function buildScene(options) {
 function makeTakeover(doc, options) {
   const settings = options || {}
   const store = settings.store || makeStore()
-  const win = makeWindow(store)
+  const win = makeWindow(store, settings)
   const calls = { jump: [], diag: [] }
   const factory = new Function('RAILVIEW', TAKEOVER + '\n;return RAILTAKE')
   const RAILTAKE = factory(VIEW)
@@ -411,6 +427,16 @@ function makeTakeover(doc, options) {
 const flush = async () => { for (let i = 0; i < 6; i += 1) await Promise.resolve() }
 
 function railOf(doc) { return doc.querySelector('.dsh_tm_rail') }
+
+/** 可见轨数量：原生标记节点未 hidden 算一条，自绘轨算一条。 */
+function visibleRailCount(doc, win) {
+  let count = 0
+  for (const nav of doc.querySelectorAll('nav')) {
+    const computed = win.getComputedStyle(nav)
+    if (computed.visibility !== 'hidden') count += 1
+  }
+  return count
+}
 function rowButtons(doc) {
   const rail = railOf(doc)
   if (rail === null) return []
@@ -442,12 +468,13 @@ console.log('\nrail-takeover')
 // ── 1. 接管成功 ────────────────────────────────────────────────────
 await test('接管成功：原生被隐藏、自绘轨插在原位、行数与轮号正确', async () => {
   const scene = buildScene()
-  const { RAILTAKE, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  const { RAILTAKE, dispose, win } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
   await flush()
 
   assert.equal(scene.nav.style.visibility, 'hidden', '原生 nav 必须被隐藏')
   assert.equal(scene.nav.getAttribute('aria-hidden'), 'true')
   assert.equal(scene.nav.getAttribute('data-dsh-tm-native'), 'hidden')
+  assert.equal(win.getComputedStyle(scene.nav).visibility, 'hidden', '计算样式也必须 hidden')
   const rail = railOf(scene.doc)
   assert.ok(rail !== null, '必须渲染自绘轨')
   assert.equal(rail.parentElement, scene.slot, '自绘轨与原生 nav 同父节点，才能共用定位上下文')
@@ -467,6 +494,103 @@ await test('接管成功：原生被隐藏、自绘轨插在原位、行数与�
   assert.equal(rows[1].getAttribute('data-active'), '1')
   assert.equal(rows[0].getAttribute('data-active'), '0')
 
+  dispose()
+})
+
+await test('双轨互斥：接管时只有一条可见轨；原生被替换后立即补打标', async () => {
+  const scene = buildScene()
+  const { RAILTAKE, win, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  assert.equal(visibleRailCount(scene.doc, win), 1, '原生隐藏 + 自绘轨 = 一条可见轨')
+
+  // 模拟 React 重建 nav：旧节点移除，新节点没有标记和 inline style。
+  const replacement = scene.doc.createElement('nav')
+  replacement.setAttribute('aria-label', '轮次导航')
+  const list = scene.doc.createElement('div')
+  replacement.appendChild(list)
+  for (let i = 0; i < 3; i += 1) {
+    const button = scene.doc.createElement('button')
+    button.setAttribute('data-index', String(i))
+    button.setAttribute('aria-label', '跳转到第 ' + (i + 1) + ' 轮')
+    if (i === 1) button.setAttribute('aria-current', 'true')
+    list.appendChild(button)
+  }
+  scene.slot.appendChild(replacement)
+  scene.slot.removeChild(scene.nav)
+  win.fireMutation(scene.doc.body, [{ type: 'childList' }])
+  win.runTimers()
+  await flush()
+
+  assert.equal(replacement.getAttribute('data-dsh-tm-native'), 'hidden', '新 nav 必须重新打标')
+  assert.equal(replacement.style.visibility, 'hidden')
+  assert.equal(visibleRailCount(scene.doc, win), 1, '替换过程中也不允许双轨并存')
+  assert.equal(railOf(scene.doc) !== null, true)
+  dispose()
+})
+
+await test('React 清掉 inline style / 标记：navObserver 立即补回 hidden', async () => {
+  const scene = buildScene()
+  const { win, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+
+  scene.nav.style.visibility = ''
+  scene.nav.removeAttribute('data-dsh-tm-native')
+  win.fireMutation(scene.nav, [{ type: 'attributes', attributeName: 'style' }])
+  await flush()
+  assert.equal(scene.nav.style.visibility, 'hidden', 'inline style 必须补回')
+  assert.equal(scene.nav.getAttribute('data-dsh-tm-native'), 'hidden', '属性必须补回')
+  dispose()
+})
+
+await test('自检失败：拆掉自绘轨、保留原生、灰字写明「原生轨无法隐藏」', async () => {
+  const scene = buildScene()
+  const { win, calls, dispose } = makeTakeover(scene.doc, {
+    loadOutline: () => Promise.resolve(OUTLINE),
+    nativeNeverHidden: true,
+  })
+  await flush()
+  win.runTimers()
+  await flush()
+
+  assert.equal(railOf(scene.doc), null, '自检失败必须移除自绘轨')
+  assert.equal(scene.nav.style.visibility, '', '原生必须恢复可见')
+  assert.equal(scene.nav.getAttribute('data-dsh-tm-native'), null)
+  assert.equal(visibleRailCount(scene.doc, win), 1, '失败后只剩原生一条')
+  const notice = scene.doc.getElementById('dsh_tm_rail_notice')
+  assert.ok(notice !== null)
+  assert.equal(notice.querySelector('.dsh_tm_railnoticetext').textContent, '历史轨未接管：原生轨无法隐藏')
+  assert.ok(calls.diag.includes('原生轨无法隐藏'))
+  dispose()
+})
+
+await test('折叠动画期间不做 getComputedStyle；动画结束后恢复', async () => {
+  const scene = buildScene()
+  const { RAILTAKE, win, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  // 先清掉挂载自检的计时器，避免它把调用数带进来。
+  win.runTimers()
+  await flush()
+
+  const before = win.getComputedStyleCalls()
+  RAILTAKE.setCollapsed(true)
+  assert.equal(RAILTAKE.animating(), true)
+  RAILTAKE.sync()
+  assert.equal(win.getComputedStyleCalls(), before, '折叠中 sync 不得量几何')
+  win.runTimers()
+  assert.equal(RAILTAKE.animating(), false)
+  dispose()
+})
+
+await test('抽屉覆盖模式：setDockObscured 临时隐藏自绘轨，关闭后恢复', async () => {
+  const scene = buildScene()
+  const { RAILTAKE, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  const rail = railOf(scene.doc)
+  assert.equal(rail.style.visibility === undefined ? '' : rail.style.visibility, '')
+  RAILTAKE.setDockObscured(true)
+  assert.equal(rail.style.visibility, 'hidden')
+  RAILTAKE.setDockObscured(false)
+  assert.equal(rail.style.visibility === undefined ? '' : rail.style.visibility, '')
   dispose()
 })
 
@@ -715,7 +839,8 @@ await test('折叠条：点击收成 16px 竖条，再点展开；按会话记�
 
   collapse.dispatchEvent({ type: 'click' })
   assert.equal(rail.getAttribute('data-collapsed'), '1')
-  assert.equal(rail.style.width, '16px', '折叠后收成 16px 竖条')
+  assert.equal(rail.style.width, '200px', '折叠不再改 width，避免逐帧布局')
+  assert.ok(src.includes('clip-path:inset(0 0 0 calc(100% - 16px))'), '折叠用 clip-path 留 16px')
   assert.equal(store.getItem('dsh.tm.rail.collapsed.s1'), '1', '折叠状态按会话记忆')
   assert.equal(rail.getAttribute('data-tier'), 'normal', '三档宽度语义不变')
 
@@ -732,7 +857,8 @@ await test('折叠状态跨启动还原（同一会话的 localStorage 键）', 
   const { dispose } = makeTakeover(scene.doc, { store, loadOutline: () => Promise.resolve(OUTLINE) })
   await flush()
   assert.equal(railOf(scene.doc).getAttribute('data-collapsed'), '1')
-  assert.equal(railOf(scene.doc).style.width, '16px')
+  assert.equal(railOf(scene.doc).style.width, '200px')
+  assert.equal(railOf(scene.doc).getAttribute('data-collapsed'), '1')
   dispose()
 })
 
@@ -755,8 +881,9 @@ await test('自动折叠：离开 600ms 收成 16px 竖条，移入立即展开�
   const rail = railOf(scene.doc)
   assert.equal(RAILTAKE.autoHideEnabled(), true, '默认开启自动折叠')
   assert.equal(rail.getAttribute('data-collapsed'), '0')
-  assert.ok(src.includes('transition:width .16s ease-out,opacity .16s ease-out'),
-    '宽度/透明度过渡要写在 rail 上，避免每帧重排整棵树')
+  assert.ok(src.includes('transition:clip-path .18s ease-out,opacity .18s ease-out'),
+    '过渡必须只走 clip-path/opacity，不再动 width')
+  assert.equal(src.includes('transition:width .16s'), false, 'width 过渡会逐帧触发布局')
 
   rail.dispatchEvent({ type: 'pointerleave' })
   assert.equal(win.timers.some(timer => timer.delay === 600), true, '离开后应挂 600ms 定时器')
@@ -764,7 +891,7 @@ await test('自动折叠：离开 600ms 收成 16px 竖条，移入立即展开�
   win.runTimers()
   assert.equal(rail.getAttribute('data-collapsed'), '1', '自动收起必须是几何折叠，不只是变淡')
   assert.equal(rail.getAttribute('data-autohide'), '1')
-  assert.equal(rail.style.width, '16px', '自动折叠真实缩到 16px')
+  assert.equal(rail.style.width, '200px', '折叠用 clip-path，width 固定')
   assert.equal(store.getItem('dsh.tm.rail.collapsed.s1'), null, '自动折叠不写手动折叠键')
 
   rail.dispatchEvent({ type: 'pointerenter' })
@@ -809,7 +936,7 @@ await test('手动折叠优先：自动折叠不会把手动收起的轨展开',
   win.runTimers()
   rail.dispatchEvent({ type: 'pointerenter' })
   assert.equal(rail.getAttribute('data-collapsed'), '1', '手动折叠时移入不能自动展开')
-  assert.equal(rail.style.width, '16px')
+  assert.equal(rail.style.width, '200px', '手动折叠也走 clip-path')
 
   scene.doc.dispatch('keydown', { altKey: true, code: 'BracketLeft', key: '[' })
   assert.equal(rail.getAttribute('data-collapsed'), '0', 'Alt+[ 是手动展开入口')

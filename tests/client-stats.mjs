@@ -54,6 +54,11 @@ const STATS_VALUE = {
 }
 
 const COMPONENT_SOURCE = [
+  extractFunction(src, 'statsSortKey'),
+  extractFunction(src, 'readStatsSort'),
+  extractFunction(src, 'saveStatsSort'),
+  extractFunction(src, 'statsCompactNumber'),
+  extractFunction(src, 'statsThousands'),
   extractFunction(src, 'statsPageModel'),
   extractFunction(src, 'statsPageNodes'),
   extractFunction(src, 'resolveWorkspaceIdForSession'),
@@ -68,12 +73,17 @@ async function mountStats(handler, sessionId) {
   const runtime = await renderComponent(
     COMPONENT_SOURCE,
     'StatsTabBody',
-    ['STATSFMT', 'RIGHT_TABS', 'STATS_KIND', 'STATS_TITLE', 'fetch', 'errorText', 'useTopicMapTheme'],
+    ['STATSFMT', 'RIGHT_TABS', 'STATS_KIND', 'STATS_TITLE',
+      'STATS_SORT_PREFIX', 'STATS_SORT_TURNS', 'STATS_SORT_TOKENS',
+      'fetch', 'errorText', 'useTopicMapTheme'],
     [
       STATSFMT,
       RIGHT_TABS,
       'topic-map-stats',
       '统计',
+      'dsh.tm.stats.sort.',
+      'turns',
+      'tokens',
       fake.fetch,
       error => String(error && error.message ? error.message : error),
       function () {},
@@ -180,6 +190,95 @@ await test('就绪后刷新按钮可用（加载中才禁用）', async () => {
   })
   const refresh = byClass(tree, 'dsh_tm_statsrefresh')[0]
   assert.equal(refresh.props.disabled, false)
+})
+
+await test('Top 会话排序：默认轮数倒序，切 Token 不重新请求，bar 按当前依据', async () => {
+  const sortedValue = {
+    sessions: 3,
+    turns: 20,
+    activeDays: 2,
+    topSessions: [
+      { title: '会话 A', turns: 5, tokens: 100, lastActive: NOW - 60 * 60 * 1000 },
+      { title: '会话 B', turns: 10, tokens: 50, lastActive: NOW - 2 * 60 * 60 * 1000 },
+      { title: '会话 C', turns: 5, tokens: 800, lastActive: NOW - 3 * 60 * 60 * 1000 },
+    ],
+    usage: { input: 1000, output: 500 },
+  }
+  const { runtime, tree, calls } = await mountStats(({ action }) => {
+    if (action === 'workspaces') return { value: [{ id: 'ws-1', sessionIds: ['s1'] }] }
+    if (action === 'stats') return { value: sortedValue }
+    return { ok: false, error: 'unexpected ' + action }
+  })
+  const titles = () => byClass(runtime.tree, 'dsh_tm_statsrowtitle').map(textOf)
+  assert.deepEqual(titles(), ['会话 B', '会话 A', '会话 C'], '轮数倒序；同轮数按 lastActive 倒序')
+  assert.deepEqual(byClass(runtime.tree, 'dsh_tm_statsrowturns').map(textOf), ['10 轮', '5 轮', '5 轮'])
+
+  const statsBefore = statsCalls(calls).length
+  const tokenButton = findAll(runtime.tree, node => node.props['data-sort'] === 'tokens')[0]
+  assert.equal(tokenButton.props.disabled, false)
+  click(tokenButton)
+  await runtime.settle()
+
+  assert.equal(statsCalls(calls).length, statsBefore, '切换排序不重新请求 /stats')
+  assert.deepEqual(titles(), ['会话 C', '会话 A', '会话 B'], 'Token 倒序')
+  assert.deepEqual(byClass(runtime.tree, 'dsh_tm_statsrowturns').map(textOf), ['800', '100', '50'])
+  assert.deepEqual(byClass(runtime.tree, 'dsh_tm_statsbar').map(bar => bar.props.style.width), ['100%', '13%', '6%'])
+})
+
+await test('Top 会话排序：按工作区记忆；tokens 缺失时禁用 Token 并给 title', async () => {
+  const memory = new Map()
+  const previous = globalThis.localStorage
+  globalThis.localStorage = {
+    getItem(key) { return memory.has(key) ? memory.get(key) : null },
+    setItem(key, value) { memory.set(key, String(value)) },
+  }
+  try {
+    const sortedValue = {
+      sessions: 2,
+      turns: 15,
+      topSessions: [
+        { title: '会话 A', turns: 5, tokens: 100, lastActive: NOW - 1000 },
+        { title: '会话 B', turns: 10, tokens: 50, lastActive: NOW - 2000 },
+      ],
+      usage: { input: 10, output: 20 },
+    }
+    const first = await mountStats(({ action }) => {
+      if (action === 'workspaces') return { value: [{ id: 'ws-1', sessionIds: ['s1'] }] }
+      if (action === 'stats') return { value: sortedValue }
+      return { ok: false, error: 'unexpected ' + action }
+    })
+    click(findAll(first.runtime.tree, node => node.props['data-sort'] === 'tokens')[0])
+    await first.runtime.settle()
+    assert.equal(memory.get('dsh.tm.stats.sort.ws-1'), 'tokens')
+
+    const second = await mountStats(({ action }) => {
+      if (action === 'workspaces') return { value: [{ id: 'ws-1', sessionIds: ['s1'] }] }
+      if (action === 'stats') return { value: sortedValue }
+      return { ok: false, error: 'unexpected ' + action }
+    })
+    assert.equal(byClass(second.runtime.tree, 'dsh_tm_statsrowtitle').map(textOf)[0], '会话 A', '恢复 token 排序')
+
+    const missing = await mountStats(({ action }) => {
+      if (action === 'workspaces') return { value: [{ id: 'ws-2', sessionIds: ['s1'] }] }
+      if (action === 'stats') {
+        return {
+          value: {
+            sessions: 1,
+            turns: 5,
+            topSessions: [{ title: '无 token', turns: 5, lastActive: NOW }],
+            usage: { input: 0, output: 0 },
+          },
+        }
+      }
+      return { ok: false, error: 'unexpected ' + action }
+    })
+    const disabled = findAll(missing.runtime.tree, node => node.props['data-sort'] === 'tokens')[0]
+    assert.equal(disabled.props.disabled, true)
+    assert.equal(disabled.props.title, '统计接口未提供 token 数据')
+  } finally {
+    if (previous === undefined) delete globalThis.localStorage
+    else globalThis.localStorage = previous
+  }
 })
 
 finish()

@@ -540,6 +540,12 @@ await test('自动归类：预览按 confidence 排序、可取消勾选、应�
   assert.deepEqual(applied[0].body.suggestions.map(item => item.sessionId), ['s5'])
   const notice = byClass(runtime.tree, 'dsh_tm_histcatnotice')[0]
   assert.ok(textOf(notice).includes('已归类 1 个会话（可撤销）'))
+  assert.equal(nodeCount(runtime.tree, 'c-a'), '3', '应用后树节点计数按新 store 更新')
+  assert.equal(nodeCount(runtime.tree, ROOT_ID), '0', '未归类会话数同步减少')
+  const refreshCalls = calls.filter(call => call.action === 'categories' || call.action === 'sessions')
+  const afterApply = refreshCalls.slice(refreshCalls.length - 2)
+  assert.deepEqual(afterApply.map(call => call.action), ['categories', 'sessions'], '先分类后会话，串行刷新')
+  assert.ok(afterApply.every(call => call.body.workspaceId === 'ws-1'), '刷新必须锁在应用时的工作区')
   assert.equal(findAll(runtime.tree, node => String(node.props.className || '').includes('dsh_tm_histcatundo')).length, 1)
 
   click(findAll(runtime.tree, node => String(node.props.className || '').includes('dsh_tm_histcatundo'))[0])

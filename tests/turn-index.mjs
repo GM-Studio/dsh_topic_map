@@ -196,7 +196,7 @@ await test('轮次行字段完整、类型正确', () => {
   ]))
 
   const required = [
-    'turn', 'seq', 'start', 'end', 'ms',
+    'turn', 'seq', 'start', 'end', 'endSeq', 'ms',
     'prompt', 'response', 'tools', 'files', 'commands', 'usage',
     'model', 'endReason', 'interrupted', 'steps', 'truncated',
   ]
@@ -206,6 +206,7 @@ await test('轮次行字段完整、类型正确', () => {
   assert.equal(row.seq, 0)
   assert.equal(row.start, BASE_TIME)
   assert.equal(row.end, BASE_TIME + 5000)
+  assert.equal(Number.isInteger(row.endSeq), true)
   assert.equal(row.ms, 5000)
   assert.equal(typeof row.prompt, 'string')
   assert.equal(typeof row.response, 'string')
@@ -220,6 +221,19 @@ await test('轮次行字段完整、类型正确', () => {
   assert.equal(row.endReason, 'completed')
   assert.equal(row.interrupted, false)
   assert.equal(row.steps, 2)
+})
+
+await test('endSeq：已终结轮记录 turn/end seq，未终结轮为 null', () => {
+  const events = makeEvents([{ prompt: '甲' }, { prompt: '乙' }])
+  const [first, second] = buildTurnRows(events)
+  const end0 = events.find(event => event.type === 'turn/end' && event.data.turn === 0)
+  const end1 = events.find(event => event.type === 'turn/end' && event.data.turn === 1)
+  assert.equal(first.endSeq, end0.seq)
+  assert.equal(second.endSeq, end1.seq)
+
+  const unfinished = events.filter(event => !(event.type === 'turn/end' && event.data.turn === 1))
+  const [, openRow] = buildTurnRows(unfinished)
+  assert.equal(openRow.endSeq, null, '没有 turn/end 的轮次不能伪造 endSeq')
 })
 
 await test('命令抽取：command→cmd→script→args.command→args.cmd 优先', () => {
@@ -474,7 +488,7 @@ await test('revision 数字入参按字符串比较', async () => {
   })
 })
 
-await test('schema 2 旧索引判定过期并整体重建到 schema 3', async () => {
+await test('schema 3 旧索引判定过期并整体重建到 schema 4', async () => {
   await withTempDir(async dir => {
     const events = makeEvents([{
       prompt: '旧索引',
@@ -487,18 +501,18 @@ await test('schema 2 旧索引判定过期并整体重建到 schema 3', async ()
       loadEvents: async () => events,
     })
 
-    // 手工退回 schema 2：改 meta、删掉行里的 commands，模拟上一版产物。
+    // 手工退回 schema 3：改 meta、删掉行里的 endSeq，模拟上一版产物。
     const lines = (await readFile(first.path, 'utf8')).trimEnd().split('\n')
     const meta = JSON.parse(lines[0])
-    meta.schema = 2
+    meta.schema = 3
     const rows = lines.slice(1).map(line => {
       const row = JSON.parse(line)
-      delete row.commands
+      delete row.endSeq
       return JSON.stringify(row)
     })
     await writeFile(first.path, [JSON.stringify(meta), ...rows].join('\n') + '\n', 'utf8')
 
-    assert.equal(await readIndexMeta(dir, 'sess-schema'), null, 'schema 2 不该被当成可用索引')
+    assert.equal(await readIndexMeta(dir, 'sess-schema'), null, 'schema 3 不该被当成可用索引')
     const stale = await readIndexFile(dir, 'sess-schema')
     assert.equal(stale.ok, false)
     assert.equal(stale.reason, 'meta')
@@ -513,13 +527,14 @@ await test('schema 2 旧索引判定过期并整体重建到 schema 3', async ()
         return events
       },
     })
-    assert.equal(second.skipped, false, 'schema 2 必须触发重建')
+    assert.equal(second.skipped, false, 'schema 3 必须触发重建')
     assert.equal(second.reason, 'meta')
     assert.equal(loads, 1)
     const parsed = parseIndexText(await readFile(second.path, 'utf8'))
     assert.equal(parsed.meta.schema, INDEX_SCHEMA)
-    assert.equal(parsed.meta.schema, 3)
+    assert.equal(parsed.meta.schema, 4)
     assert.deepEqual(parsed.turns[0].commands, ['echo hi'])
+    assert.equal(Number.isInteger(parsed.turns[0].endSeq), true)
   })
 })
 

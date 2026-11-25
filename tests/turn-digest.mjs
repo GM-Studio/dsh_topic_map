@@ -238,15 +238,12 @@ await test('摘要与归类共用 askOnce：同一 helper、同样的路由与�
   })
 })
 
-await test('缓存命中：第二次不调模型；revision 变化重算；force 重算', async () => {
+await test('已完成轮缓存：revision 变化仍命中；endSeq 变化重算；force 重算', async () => {
   await withTempHome(async () => {
     const revisions = { [SESSION]: 'rev-1' }
+    const events = { [SESSION]: makeEvents([{ prompt: '甲', response: '乙' }]) }
     const llm = makeFakeLlm()
-    const ctx = makeCtx({
-      events: { [SESSION]: makeEvents([{ prompt: '甲', response: '乙' }]) },
-      revisions,
-      llm,
-    })
+    const ctx = makeCtx({ events, revisions, llm })
 
     const first = await generateTurnDigest(ctx, { sessionId: SESSION, turn: 0 })
     assert.equal(first.ok, true, first.error)
@@ -259,12 +256,23 @@ await test('缓存命中：第二次不调模型；revision 变化重算；force
     assert.equal(second.value.summary, first.value.summary)
     assert.equal(llm.calls, 1, '缓存命中不应再调模型')
 
+    // 活会话发了新消息：revision 变，但已完成轮的内容不变，必须继续命中。
     revisions[SESSION] = 'rev-2'
-    const changed = await generateTurnDigest(ctx, { sessionId: SESSION, turn: 0 })
-    assert.equal(changed.ok, true, changed.error)
-    assert.equal(changed.value.cached, false)
-    assert.equal(changed.value.revision, 'rev-2')
-    assert.equal(llm.calls, 2, 'revision 变了必须重算')
+    const afterRevision = await generateTurnDigest(ctx, { sessionId: SESSION, turn: 0 })
+    assert.equal(afterRevision.ok, true, afterRevision.error)
+    assert.equal(afterRevision.value.cached, true, 'revision 变化不应使已完成轮缓存失效')
+    assert.equal(afterRevision.value.revision, 'rev-2')
+    assert.equal(llm.calls, 1, 'revision 变化不应重新调模型')
+
+    // 整会话重建/截断导致该轮 endSeq 变化：缓存自然失效。
+    const oldEndSeq = events[SESSION].find(event => event.type === 'turn/end').seq
+    events[SESSION] = events[SESSION].map(event =>
+      event.type === 'turn/end' ? { ...event, seq: event.seq + 1000 } : event)
+    const afterEndSeq = await generateTurnDigest(ctx, { sessionId: SESSION, turn: 0 })
+    assert.equal(afterEndSeq.ok, true, afterEndSeq.error)
+    assert.equal(afterEndSeq.value.cached, false, 'endSeq 变化必须重算')
+    assert.notEqual(oldEndSeq + 1000, oldEndSeq)
+    assert.equal(llm.calls, 2)
 
     const forced = await generateTurnDigest(ctx, { sessionId: SESSION, turn: 0, force: true })
     assert.equal(forced.ok, true, forced.error)
@@ -273,20 +281,43 @@ await test('缓存命中：第二次不调模型；revision 变化重算；force
   })
 })
 
-await test('缓存文件形状：{revision,summary,model,at}', async () => {
+await test('未完成轮不写缓存：每次现算，下次仍重算', async () => {
   await withTempHome(async home => {
-    const ctx = makeCtx({
-      events: { [SESSION]: makeEvents([{ prompt: '甲', response: '乙' }]) },
-    })
+    const events = {
+      [SESSION]: makeEvents([{ prompt: '进行中', response: '还没结束' }])
+        .filter(event => event.type !== 'turn/end'),
+    }
+    const llm = makeFakeLlm()
+    const ctx = makeCtx({ events, llm })
+
+    const first = await generateTurnDigest(ctx, { sessionId: SESSION, turn: 0 })
+    assert.equal(first.ok, true, first.error)
+    assert.equal(first.value.cached, false)
+    assert.equal(llm.calls, 1)
+
+    const second = await generateTurnDigest(ctx, { sessionId: SESSION, turn: 0 })
+    assert.equal(second.ok, true, second.error)
+    assert.equal(second.value.cached, false, '未完成轮不应命中缓存')
+    assert.equal(llm.calls, 2, '未完成轮每次都要重算')
+    await assert.rejects(readFile(digestPath(home, SESSION, 0), 'utf8'), '未完成轮不应写缓存文件')
+  })
+})
+
+await test('缓存文件形状：{revision,endSeq,summary,model,at}', async () => {
+  await withTempHome(async home => {
+    const events = { [SESSION]: makeEvents([{ prompt: '甲', response: '乙' }]) }
+    const ctx = makeCtx({ events })
     const result = await generateTurnDigest(ctx, { sessionId: SESSION, turn: 0 })
     assert.equal(result.ok, true, result.error)
 
+    const endSeq = events[SESSION].find(event => event.type === 'turn/end').seq
     const raw = JSON.parse(await readFile(digestPath(home, SESSION, 0), 'utf8'))
     assert.equal(raw.revision, 'rev-1')
+    assert.equal(raw.endSeq, endSeq)
     assert.equal(raw.summary, result.value.summary)
     assert.equal(raw.model, 'DeepSeek-Flash')
     assert.ok(Number.isFinite(raw.at) && raw.at > 0)
-    assert.deepEqual(Object.keys(raw).sort(), ['at', 'model', 'revision', 'summary'])
+    assert.deepEqual(Object.keys(raw).sort(), ['at', 'endSeq', 'model', 'revision', 'summary'])
   })
 })
 

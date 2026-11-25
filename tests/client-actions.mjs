@@ -24,6 +24,7 @@ const ACTION_SOURCE = [
   extractFunction(src, 'runHistoryAction'),
   extractFunction(src, 'historyActionSuccessText'),
   extractFunction(src, 'historyActionErrorText'),
+  extractFunction(src, 'historyRailHitTurns'),
 ].join('\n')
 
 function buildActions(handler) {
@@ -37,6 +38,7 @@ function buildActions(handler) {
       runHistoryAction: runHistoryAction,
       historyActionSuccessText: historyActionSuccessText,
       historyActionErrorText: historyActionErrorText,
+      historyRailHitTurns: historyRailHitTurns,
     }`,
   )(fake.fetch, error => String(error && error.message ? error.message : error))
   return { api: api, calls: fake.calls }
@@ -122,5 +124,25 @@ function apiNeeds(kind) {
   const api = new Function(`${extractFunction(src, 'historyActionNeedsConfirm')};return historyActionNeedsConfirm`)()
   return api(kind)
 }
+
+await test('历史检索 → 轨道命中：只取当前会话、去重、非法轮号忽略', async () => {
+  const { api } = buildActions(() => ({ value: {} }))
+  const hits = [
+    { sessionId: 's1', turn: 3 },
+    { sessionId: 's2', turn: 8 },
+    { sessionId: 's1', turn: 3 },
+    { sessionId: 's1', turn: '7' },
+    { sessionId: 's1', turn: 0 },
+    { sessionId: 's1', turn: 'x' },
+    null,
+  ]
+  assert.deepEqual(api.historyRailHitTurns(hits, 's1'), [3, 7])
+  assert.deepEqual(api.historyRailHitTurns(hits, 's2'), [8])
+  assert.deepEqual(api.historyRailHitTurns(hits, ''), [])
+  assert.deepEqual(api.historyRailHitTurns(null, 's1'), [])
+  assert.ok(src.includes('RAILTAKE.setHits(sid, historyRailHitTurns(result.hits, sid))'),
+    '搜索结果就绪时必须把当前会话命中写入轨道')
+  assert.ok(src.includes('RAILTAKE.setHits(sid, [])'), '清空搜索/查询中/失败时必须整组清空')
+})
 
 finish()

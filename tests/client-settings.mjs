@@ -84,6 +84,9 @@ const SETTINGS_SOURCE = [
   extractFunction(src, 'railTierText'),
   extractFunction(src, 'settingsDefaultValues'),
   extractFunction(src, 'railPrefsSnapshot'),
+  extractFunction(src, 'formatIndexBytes'),
+  extractFunction(src, 'indexStatsText'),
+  extractFunction(src, 'indexStatsTitle'),
   extractFunction(src, 'requestTopicMap'),
   extractFunction(src, 'RightTabStrip'),
   extractFunction(src, 'SettingsTabBody'),
@@ -97,6 +100,14 @@ async function mountSettings(options) {
       return { value: Object.assign({}, opts.config === undefined ? CONFIG : opts.config, body) }
     }
     if (action === 'workspace-reindex') return { value: { queued: 2 } }
+    if (action === 'index-stats') {
+      if (opts.indexStatsError !== undefined) return { status: 503, ok: false, error: opts.indexStatsError }
+      return {
+        value: opts.indexStats === undefined
+          ? { sessions: 12, turns: 34, bytes: 3355443, digests: 30, digestBytes: 400000 }
+          : opts.indexStats,
+      }
+    }
     return { ok: false, error: 'unexpected ' + action + ' ' + method }
   })
   const rail = makeRailFake()
@@ -106,7 +117,7 @@ async function mountSettings(options) {
     [
       'SETTINGVIEW', 'RAILVIEW', 'RAILTAKE', 'RAIL_DEFAULT_WIDTH', 'RIGHT_TABS',
       'SETTINGS_KIND', 'SETTINGS_TITLE', 'fetch', 'errorText', 'useTopicMapTheme',
-      'loadStatsForSession', 'currentWorkspaceId',
+      'currentWorkspaceId',
     ],
     [
       SETTINGVIEW,
@@ -119,7 +130,6 @@ async function mountSettings(options) {
       fake.fetch,
       error => String(error && error.message ? error.message : error),
       function () {},
-      () => Promise.resolve({ ok: true, value: { sessions: 3, turns: 9 } }),
       () => Promise.resolve('ws-1'),
     ],
     { sessionId: 's1', openTab: function () {} },
@@ -153,9 +163,12 @@ await test('四组渲染：引用 / 索引 / 界面 / 模型，字段齐全且�
   assert.equal(byData(tree, 'data-setting-range', 'quoteMaxCount').length, 1)
   assert.equal(byData(tree, 'data-setting', 'turnLimit').length, 1)
   assert.equal(byData(tree, 'data-action', 'rebuild').length, 1)
-  assert.ok(textOf(tree).includes('索引会话数'))
-  assert.ok(textOf(tree).includes('索引体积'))
-  assert.ok(textOf(tree).includes('3 个'), '索引会话数来自 /stats 的 sessions')
+  const indexRow = byClass(tree, 'dsh_tm_setindexrow')[0]
+  assert.ok(indexRow !== undefined, '索引体积与重建按钮必须在同一行')
+  assert.ok(textOf(indexRow).includes('重建当前工作区索引'))
+  assert.ok(textOf(indexRow).includes('12 个会话 · 3.2 MB'), '索引体积文案：12 个会话 · 3.2 MB')
+  assert.equal(byData(tree, 'data-setting', 'indexStats')[0].props.title,
+    '会话 12 · 轮次 34 · 摘要 30 · 索引 3.2 MB · 摘要体积 390.6 KB')
 
   assert.equal(byData(tree, 'data-setting', 'railNative')[0].props.checked, false)
   assert.equal(byData(tree, 'data-setting', 'railAutoHide')[0].props.checked, true)
@@ -256,6 +269,13 @@ await test('rail 设置：设置页写的值进 localStorage，外部改值设�
   rail.setWidth(320)
   await runtime.settle()
   assert.ok(textOf(runtime.tree).includes('wide（320px）'))
+})
+
+await test('索引体积失败：显示 —，title 写 Host 原因', async () => {
+  const { tree } = await mountSettings({ indexStatsError: '读不到索引目录' })
+  const node = byData(tree, 'data-setting', 'indexStats')[0]
+  assert.equal(textOf(node), '—')
+  assert.ok(String(node.props.title).includes('读不到索引目录'), 'title 要能解释为什么没有数字')
 })
 
 await test('重建索引：POST /workspace-reindex，显示排队结果', async () => {

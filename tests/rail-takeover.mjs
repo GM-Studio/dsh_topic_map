@@ -18,6 +18,7 @@
 import { strict as assert } from 'node:assert'
 import { readFileSync } from 'node:fs'
 import * as VIEW from '../lib/rail-view.js'
+import { extractFunction } from './client-harness.mjs'
 
 const src = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
 
@@ -833,6 +834,104 @@ await test('rail ⋯ 菜单：恢复原生 / 自动隐藏 / 收窄 / 加宽都�
   items.find(item => labelOf(item) === '加宽').dispatchEvent({ type: 'click' })
   assert.equal(store.getItem('dsh.tm.rail.width.s1'), '320', '再加宽到 wide 320')
   dispose()
+})
+
+// ── 6e. 原生模式的切回药丸 / 命中标记 ────────────────────────────────
+await test('原生模式：右缘药丸存在，点击写 native=0 并立即接管', async () => {
+  const scene = buildScene()
+  const store = makeStore({ 'dsh.tm.rail.native': '1' })
+  const { RAILTAKE, dispose } = makeTakeover(scene.doc, { store, loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+
+  assert.equal(railOf(scene.doc), null, '原生模式不应挂自绘轨')
+  assert.equal(scene.nav.style.visibility || '', '', '原生轨保持可见')
+  const pill = scene.doc.querySelector('.dsh_tm_railrestore')
+  assert.ok(pill !== null, '原生模式必须在对话容器右缘给一个切回入口')
+  assert.equal(pill.getAttribute('aria-label'), '启用插件导航轨')
+  assert.equal(pill.title, '启用插件导航轨')
+
+  pill.dispatchEvent({ type: 'click' })
+  await flush()
+  assert.equal(store.getItem('dsh.tm.rail.native'), '0', '点击药丸写同一个 localStorage 键')
+  assert.equal(RAILTAKE.nativePreferred(), false)
+  assert.ok(railOf(scene.doc) !== null, '点击后立即接管')
+  assert.equal(scene.nav.style.visibility, 'hidden')
+  assert.equal(scene.doc.querySelector('.dsh_tm_railrestore'), null, '接管后药丸必须消失')
+  dispose()
+})
+
+await test('Alt+[ 在原生模式下切回插件轨；插件轨下仍是折叠', async () => {
+  const scene = buildScene()
+  const store = makeStore({ 'dsh.tm.rail.native': '1' })
+  const { RAILTAKE, dispose } = makeTakeover(scene.doc, { store, loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  assert.equal(railOf(scene.doc), null)
+
+  scene.doc.dispatch('keydown', { altKey: true, code: 'BracketLeft', key: '[' })
+  await flush()
+  assert.equal(store.getItem('dsh.tm.rail.native'), '0', '原生模式 Alt+[ 应切回插件轨')
+  assert.ok(railOf(scene.doc) !== null)
+
+  scene.doc.dispatch('keydown', { altKey: true, code: 'BracketLeft', key: '[' })
+  assert.equal(railOf(scene.doc).getAttribute('data-collapsed'), '1', '插件轨下 Alt+[ 仍是折叠')
+
+  RAILTAKE.setNativePreferred(true)
+  await flush()
+  assert.ok(scene.doc.querySelector('.dsh_tm_railrestore') !== null, '设置开关切到原生也要出现药丸')
+  dispose()
+})
+
+await test('命中标记：整组替换、越界轮号忽略、清空写 localStorage', async () => {
+  const scene = buildScene()
+  const { RAILTAKE, dispose, store } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  assert.equal(rowButtons(scene.doc).filter(row => row.getAttribute('data-hit') === '1').length, 0)
+
+  RAILTAKE.setHits('s1', [2, 99])
+  let rows = rowButtons(scene.doc)
+  assert.equal(rows[1].getAttribute('data-hit'), '1', '第 2 轮命中')
+  assert.equal(rowButtons(scene.doc).filter(row => row.getAttribute('data-hit') === '1').length, 1,
+    '不在大纲里的第 99 轮应被忽略，不报错')
+  assert.deepEqual(JSON.parse(store.getItem('dsh.tm.rail.hits.s1')), [2, 99], '命中集合写入 localStorage')
+
+  RAILTAKE.setHits('s1', [3])
+  rows = rowButtons(scene.doc)
+  assert.equal(rows[1].getAttribute('data-hit'), null, '换一组命中要整组替换')
+  assert.equal(rows[2].getAttribute('data-hit'), '1')
+  assert.deepEqual(RAILTAKE.hitsOf('s1'), [3])
+
+  RAILTAKE.setHits('s1', [])
+  assert.equal(rowButtons(scene.doc).filter(row => row.getAttribute('data-hit') === '1').length, 0)
+  assert.deepEqual(JSON.parse(store.getItem('dsh.tm.rail.hits.s1')), [], '清空也要落盘，避免旧标记复活')
+  dispose()
+})
+
+await test('命中标记：轨道重挂载后从 localStorage 恢复；别的会话不串台', async () => {
+  const scene = buildScene()
+  const store = makeStore({ 'dsh.tm.rail.hits.s1': '[1,3]' })
+  const { RAILTAKE, dispose } = makeTakeover(scene.doc, { store, loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  const rows = rowButtons(scene.doc)
+  assert.equal(rows[0].getAttribute('data-hit'), '1')
+  assert.equal(rows[1].getAttribute('data-hit'), null)
+  assert.equal(rows[2].getAttribute('data-hit'), '1')
+
+  RAILTAKE.setHits('s2', [2])
+  assert.equal(rowButtons(scene.doc)[1].getAttribute('data-hit'), null, '别的会话的命中不能标到当前轨')
+  assert.deepEqual(JSON.parse(store.getItem('dsh.tm.rail.hits.s2')), [2])
+  dispose()
+})
+
+await test('设置页索引体积文案（纯函数）：12 个会话 · 3.2 MB', async () => {
+  const source = [
+    extractFunction(src, 'formatIndexBytes'),
+    extractFunction(src, 'indexStatsText'),
+  ].join('\n')
+  const api = new Function(`${source};return { indexStatsText: indexStatsText, formatIndexBytes: formatIndexBytes }`)()
+  assert.equal(api.formatIndexBytes(3355443), '3.2 MB')
+  assert.equal(api.indexStatsText({ sessions: 12, bytes: 3355443 }), '12 个会话 · 3.2 MB')
+  assert.equal(api.indexStatsText({ sessions: 0, bytes: 0 }), '0 个会话 · 0 B')
+  assert.equal(api.indexStatsText(null), '—')
 })
 
 // ── 7. 卸载 ────────────────────────────────────────────────────────

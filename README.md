@@ -162,7 +162,7 @@ Host 半只提供 `/api/topic-map/*` 的一组端点。面板**不碰你的对�
 | `POST /progress` `POST /cancel-analyze` | 进度轮询 / 取消 |
 | `POST /apply-semantic` `POST /revert-semantic` | 采纳 / 回退精化结果 |
 | `POST /ui-state` | 界面状态读写（筛选、选中项等） |
-| `GET/POST /config` | 模型与轮次上限 |
+| `GET/POST /config` | 模型、轮次上限、`digestLevel`（摘要档位）、`quoteMaxCount` / `quoteMaxChars`（引用配额） |
 | `POST /reload` | 重载 Host 半（ESM 缓存） |
 
 读的是宿主公开契约：`ctx.sessionQuery.readSession` / `readTitleSnapshots` / `listEvents`、

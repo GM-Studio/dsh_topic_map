@@ -12,7 +12,7 @@ import { strict as assert } from 'node:assert'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { flushIndexSyncs, searchWorkspaceIndex, syncSessionIndexFor } from '../lib/index.js'
+import { flushIndexSyncs, reindexWorkspace, searchWorkspaceIndex, syncSessionIndexFor } from '../lib/index.js'
 import { defaultSessionsDir, indexFilePath, readIndexFile } from '../lib/turn-index.js'
 
 let passed = 0
@@ -64,17 +64,16 @@ function makeCtx(options = {}) {
   const titles = options.titles ?? {}
   const revisions = options.revisions ?? {}
   const state = { readSession: 0, readTitle: 0 }
+  const workspaces = options.workspaces ?? [{
+    id: 'ws-1',
+    path: 'E:\\ws',
+    title: '工作区 A',
+    sessionIds: options.sessions ?? Object.keys(events),
+  }]
   const ctx = {
     get(name) {
       if (name !== 'workspaceRegistry') return undefined
-      return {
-        list: () => [{
-          id: 'ws-1',
-          path: 'E:\\ws',
-          title: '工作区 A',
-          sessionIds: options.sessions ?? Object.keys(events),
-        }],
-      }
+      return { list: () => workspaces }
     },
     sessionQuery: {
       async readTitleSnapshots(ids) {
@@ -439,14 +438,142 @@ await test('没有工作区：返回空结果骨架（不抛错）', async () =>
   assert.equal(typeof result.elapsedMs, 'number')
 })
 
+await test('sessionId 反解工作区：用所属工区检索并回传 workspace', async () => {
+  await withTempHome(async () => {
+    const events = {
+      'sess-a': makeEvents([{ prompt: '甲的 共同词' }]),
+      'sess-b': makeEvents([{ prompt: '乙的 共同词' }]),
+    }
+    const { ctx } = makeCtx({
+      events,
+      workspaces: [
+        { id: 'ws-1', path: 'E:\\ws', title: '工作区 A', sessionIds: ['sess-a'] },
+        { id: 'ws-2', path: 'F:\\other', title: '工作区 B', sessionIds: ['sess-b'] },
+      ],
+    })
+    await syncSessionIndexFor(ctx, 'sess-a')
+    await syncSessionIndexFor(ctx, 'sess-b')
+
+    const result = await searchWorkspaceIndex(ctx, {
+      sessionId: 'sess-b',
+      keywords: '共同词',
+      limit: 10,
+      now: BASE_TIME + 10_000,
+    })
+    assert.equal(result.total, 1)
+    assert.equal(result.hits[0].sessionId, 'sess-b')
+    assert.deepEqual(result.workspace, { id: 'ws-2', path: 'F:\\other', title: '工作区 B' })
+    assert.equal(result.workspaceId, 'ws-2')
+    assert.equal(result.coverage.sessions, 1)
+    assert.equal(result.coverage.indexed, 1)
+  })
+})
+
+await test('sessionId 不属于任何工作区：不静默退第一个，带 reason 返回空结果', async () => {
+  await withTempHome(async () => {
+    const { ctx } = makeCtx({ events: { 'sess-a': makeEvents([{ prompt: '词' }]) } })
+    const result = await searchWorkspaceIndex(ctx, {
+      sessionId: 'session-unknown',
+      keywords: '词',
+      limit: 10,
+    })
+    assert.equal(result.hits.length, 0)
+    assert.equal(result.total, 0)
+    assert.equal(result.scanned, 0)
+    assert.equal(result.workspace, null)
+    assert.equal(result.workspaceId, null)
+    assert.equal(result.reason, '当前会话不属于任何工作区')
+    assert.deepEqual(result.coverage, {
+      sessions: 0,
+      indexed: 0,
+      scannedFromLog: 0,
+      indexing: 0,
+    })
+    assert.deepEqual(result.indexed, { ready: 0, missing: 0 })
+  })
+})
+
+await test('coverage 口径：索引/日志/后台排队数量', async () => {
+  await withTempHome(async () => {
+    const events = {
+      'sess-cov-ready': makeEvents([{ prompt: '共同词 甲' }]),
+      'sess-cov-missing': makeEvents([{ prompt: '共同词 乙' }]),
+    }
+    const { ctx } = makeCtx({
+      events,
+      sessions: ['sess-cov-ready', 'sess-cov-missing'],
+    })
+    await syncSessionIndexFor(ctx, 'sess-cov-ready')
+
+    const result = await searchWorkspaceIndex(ctx, {
+      workspaceId: 'ws-1',
+      keywords: '共同词',
+      limit: 10,
+      now: BASE_TIME + 10_000,
+    })
+    assert.equal(result.total, 2, '索引缺失的会话也必须出结果')
+    assert.deepEqual(result.coverage, {
+      sessions: 2,
+      indexed: 1,
+      scannedFromLog: 1,
+      indexing: 1,
+    })
+    assert.deepEqual(result.indexed, { ready: 1, missing: 1 })
+
+    // 后台补齐后，第二次检索应全走索引。
+    await flushIndexSyncs()
+    const again = await searchWorkspaceIndex(ctx, {
+      workspaceId: 'ws-1',
+      keywords: '共同词',
+      limit: 10,
+      now: BASE_TIME + 10_000,
+    })
+    assert.deepEqual(again.coverage, {
+      sessions: 2,
+      indexed: 2,
+      scannedFromLog: 0,
+      indexing: 0,
+    })
+  })
+})
+
+await test('workspace-reindex：全部会话入队、立即返回、可重复触发', async () => {
+  await withTempHome(async () => {
+    const ids = ['sess-r1', 'sess-r2', 'sess-r3']
+    const events = Object.fromEntries(ids.map(id => [id, makeEvents([{ prompt: id }])]))
+    const { ctx } = makeCtx({ events, sessions: ids })
+
+    const first = reindexWorkspace(ctx, { workspaceId: 'ws-1' })
+    assert.equal(first.ok, true)
+    assert.equal(first.queued, 3)
+
+    await flushIndexSyncs()
+    for (const id of ids) {
+      assert.equal((await readIndexFile(defaultSessionsDir(), id)).ok, true)
+    }
+
+    // ignoreThrottle：60 秒内再次点"一键补齐"仍会重新排队。
+    const second = reindexWorkspace(ctx, { workspaceId: 'ws-1' })
+    assert.equal(second.ok, true)
+    assert.equal(second.queued, 3)
+
+    assert.equal(reindexWorkspace(ctx, {}).httpStatus, 400)
+    assert.equal(reindexWorkspace(ctx, { workspaceId: 'nope' }).httpStatus, 404)
+  })
+})
+
 await test('响应契约字段齐全', async () => {
   await withTempHome(async () => {
     const { ctx } = makeCtx({ events: { 'sess-shape': makeEvents([{ prompt: '形状 词' }]) } })
     const result = await searchWorkspaceIndex(ctx, { workspaceId: 'ws-1', keywords: '词' })
     assert.deepEqual(Object.keys(result).sort(), [
-      'elapsedMs', 'hits', 'indexed', 'scanned', 'total', 'truncated',
+      'coverage', 'elapsedMs', 'hits', 'indexed', 'scanned', 'total', 'truncated',
+      'workspace', 'workspaceId',
     ])
     assert.deepEqual(Object.keys(result.indexed).sort(), ['missing', 'ready'])
+    assert.deepEqual(Object.keys(result.coverage).sort(), [
+      'indexed', 'indexing', 'scannedFromLog', 'sessions',
+    ])
   })
 })
 

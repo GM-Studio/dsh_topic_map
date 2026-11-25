@@ -18,6 +18,7 @@ import {
   getDigestDiagnostics,
   readTurnDetail,
 } from '../lib/index.js'
+import { askOnce } from '../lib/llm-call.js'
 
 let passed = 0
 const failures = []
@@ -66,7 +67,7 @@ function makeEvents(specs) {
 
 /** 假模型：记录 system/user/调用次数；可 gate；可失败。 */
 function makeFakeLlm(options = {}) {
-  const state = { calls: 0, systems: [], users: [] }
+  const state = { calls: 0, systems: [], users: [], streams: [], prepared: [] }
   return {
     get calls() {
       return state.calls
@@ -77,13 +78,21 @@ function makeFakeLlm(options = {}) {
     get users() {
       return state.users
     },
+    get streams() {
+      return state.streams
+    },
+    get prepared() {
+      return state.prepared
+    },
     async prepareCall(call) {
       state.calls += 1
+      state.prepared.push(call)
       state.systems.push(String(call.system ?? ''))
       state.users.push(String(call.messages?.[0]?.content?.[0]?.text ?? ''))
       return {
-        config: { ...call, provider: 'fake', model: 'fake-1' },
-        async *stream() {
+        config: { ...call },
+        async *stream(dispatch) {
+          state.streams.push(dispatch)
           if (options.gate !== undefined) await options.gate.promise
           if (options.fail === true) throw new Error('model down')
           yield { type: 'text-delta', text: options.text ?? '摘要：结论是跳转逻辑已修复。' }
@@ -187,6 +196,45 @@ await test('提示词包含 ≤400 字/保留结论命令文件/不要复述过�
     }
     assert.ok(user.includes('提问：') && user.includes('回答：'), '提示词应带上提问/回答')
     assert.ok(user.includes('npm test'), '提示词应带上命令')
+  })
+})
+
+await test('摘要与归类共用 askOnce：同一 helper、同样的路由与会话头字段', async () => {
+  await withTempHome(async () => {
+    const llm = makeFakeLlm()
+    const ctx = makeCtx({
+      events: { [SESSION]: makeEvents([{ prompt: '甲', response: '乙' }]) },
+      llm,
+    })
+    const digest = await generateTurnDigest(ctx, { sessionId: SESSION, turn: 0 })
+    assert.equal(digest.ok, true, digest.error)
+
+    // 归类路径也是同一个 helper、同一组字段（这里直接以归类参数调用它）。
+    await askOnce(
+      llm,
+      { provider: 'agent2api', model: 'DeepSeek-Flash' },
+      '归类 system',
+      '归类 user',
+      undefined,
+      { maxTokens: 100, sessionId: SESSION },
+    )
+
+    assert.equal(llm.streams.length, 2)
+    const [digestCall, categorizeCall] = llm.streams
+    assert.deepEqual(
+      { provider: digestCall.provider, model: digestCall.model, sessionId: digestCall.sessionId },
+      { provider: categorizeCall.provider, model: categorizeCall.model, sessionId: categorizeCall.sessionId },
+      '摘要与归类的路由/会话字段必须同形',
+    )
+    assert.equal(digestCall.sessionId, SESSION)
+    assert.equal(categorizeCall.sessionId, SESSION)
+    for (const key of ['messages', 'system', 'temperature', 'maxTokens', 'sessionId']) {
+      assert.ok(key in digestCall, `摘要入参缺少 ${key}`)
+      assert.ok(key in categorizeCall, `归类入参缺少 ${key}`)
+    }
+    // 宿主 adapter 读的是 stream 信封里的 sessionId；prepare 阶段也必须带上。
+    assert.equal(llm.prepared[0].sessionId, SESSION)
+    assert.equal(llm.prepared[1].sessionId, SESSION)
   })
 })
 

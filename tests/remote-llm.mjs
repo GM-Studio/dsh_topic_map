@@ -159,6 +159,20 @@ test('没有 api_key 时不发 Authorization 头', async () => {
   assert.equal(headers.authorization, undefined)
 })
 
+await atest('sessionId 写成 x-opencode-session 路由头', async () => {
+  let headers = null
+  const io = {
+    fetch: stubFetch((url, init) => {
+      headers = init.headers
+      return okJson({ choices: [{ message: { content: 'ok' } }] })
+    }),
+  }
+  await callRemote(io, { baseUrl: 'https://api.x.com', apiKey: '', modelName: 'm' }, '', 'u', {
+    sessionId: 'session-abc',
+  })
+  assert.equal(headers['x-opencode-session'], 'session-abc')
+})
+
 await atest('HTTP 错误要抛出并带上状态码', async () => {
   const io = {
     fetch: stubFetch(() => ({

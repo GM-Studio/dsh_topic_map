@@ -32,6 +32,13 @@
 
 `changes` 由 F-7 在事件出现时立刻拉取并落盘；`lost:true` 表示"曾变更但明细已不可读"。
 
+**变更哈希（schema 5）**：F-7 写盘前给每个变更文件算 sha256（`hash`），失败记
+`hashSkipped: missing | too-large | unreadable | limited`（≥2MB 跳过、单轮上限 50）。
+**旧索引重建时 legacy:true，历史轮次只写 `hash:null` 且不写 hashSkipped**——绝不能拿"现在的磁盘内容"
+冒充当时快照，否则回滚预演会给出虚假的"安全可回滚"。
+回滚预演：hash 与当前一致 → `apply`；不一致 → `modified`；无 hash → `apply` 但标注"无法校验"。
+**预演只读**，真正写文件留给后续单独设计（需要确认与撤销）。
+
 `commands` 的抽取（schema **3**）：`command/cmd/script` 直取；`code` 只有 shell 类工具直接当命令，
 其它工具（如 `run_code`）只**解包** `command:"…"` 字面量——解不出来就空着，**绝不把 JS 包装当命令**。
 schema < 3 的索引一律判过期：消费端先走日志兜底（结果立刻正确），后台再重建。
@@ -235,6 +242,17 @@ description 里写明句柄格式，模型看到 `〔…#N〕` 才知道要调�
 - 当前会话用内存 `buildTurnRows`（不依赖索引），历史会话索引优先、日志兜底，整体 2 秒超时；
 - **不跨工作区**：跨区引用写"当前工作区没有匹配该前缀"，不猜；
 - 工具的前缀匹配：唯一命中才用，多个命中**报歧义并列候选**，要求改用完整 sessionId——猜错会贴错全文。
+
+- **分类与整理（P1-3/P1-4）**：store 落 `~/.dsh/topic-map/categories/<workspaceId>.json`
+  `{version,categories:[{id,name,parentId,source}],assignments:{sessionId:{categoryId,source}}}`。
+  分类 id = `c-` + `name+parent` 的 FNV-1a 哈希（同输入同 id，重复调用不漂移）。
+  **人工优先**：手工端点强制 `source:'user'`；`applyModelFill` 只填空白、不碰 assignments；
+  user 归类拒绝被模型覆盖/取消。整理走 `planOrganize → applyPlan → undoOrganize` 三段式，
+  会丢归类的计划先给 `warnings`，同工作区写操作串行。
+- **线索与变更（P1-5/P3-1）**：`buildClue` 把检索命中按会话+自然日聚类成时间线
+  （`首次提及 / 第 N 次`）；`buildChanges` 按 `code/doc/config/other` 分组，`lost:true` 显式标注。
+
+
 
 ## 7. 动作的实现路径
 

@@ -153,6 +153,14 @@ Host 半只提供 `/api/topic-map/*` 的一组端点。面板**不碰你的对�
 | `POST /workspace-reindex` | 整工区一键补齐索引，立即返回 `queued`（后台并发 2） |
 | `POST /turn-digest` | 单轮摘要（≤400 字），按 revision 缓存；`force` 重算 |
 | `POST /session-commands` | 会话内的 **markdown 代码块**清单（不含工具执行命令）：`{seq,turn,lang,text}`，支持 `q`、`lang`（`shell` 语言组）筛选与分页 |
+| `POST /index-stats` | 索引体积统计：`{sessions,turns,bytes,digests,digestBytes}`，设置页显示「N 个会话 · X MB」 |
+| `POST /categories` | 分类 store + 树（`{version,categories,assignments,tree}`） |
+| `POST /category-save` | 新建/改名分类；手工写入固定 `source:'user'`，模型不能覆盖 |
+| `POST /category-assign` | 会话归类/取消（`categoryId:null`） |
+| `POST /category-organize` | 合并/移动/拆分，返回 `{store,undo}`；会丢归类时带 `warnings` |
+| `POST /category-undo` | 撤销一次整理 |
+| `POST /changes` | 该轮变更文件（按 `code/doc/config/other` 分组），明细不可读时 `lost:true` |
+| `POST /rollback-plan` | 回滚**预演**（只读）：`apply / same / modified / missing` 四态 + 中文摘要 |
 | `POST /turn-detail` | 单轮详情：完整问答、用量、命令、文件变更 + 前后邻居 + 标签（索引命中约 0.5ms，17 字段） |
 | `POST /index-build` | 索引维护：按会话或工作区重建（完整校验，可自愈） |
 | `POST /labels` | 标签读取：工作区全量，或按 `sessionId+turn` 取单条（同一 map 形状） |

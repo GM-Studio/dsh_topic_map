@@ -104,7 +104,7 @@ test('missing：null / 缺键 / 非字符串都算磁盘上已不存在', () => 
   assert.equal(result.summary, '5 个已不存在')
 })
 
-test('无 hash：文件存在且有行变更 → 无法校验，按 modified 处理', () => {
+test('无 hash：文件存在且有行变更 → apply（执行层另行校验）', () => {
   const files = [
     { path: 'a.js', added: 2, deleted: 1 },
     { path: 'b.js', added: 2, deleted: 1, hash: null },
@@ -117,12 +117,45 @@ test('无 hash：文件存在且有行变更 → 无法校验，按 modified 处
     'c.js': 'hc',
     'd.js': 'hd',
   })
-  assert.deepEqual(result.plan.map(item => item.state), ['modified', 'modified', 'modified', 'modified'])
+  assert.deepEqual(result.plan.map(item => item.state), ['apply', 'apply', 'apply', 'apply'])
   assert.deepEqual(result.plan.map(item => item.hash), [null, null, null, null])
-  assert.equal(result.plan[0].reason, '缺少快照哈希，无法验证磁盘内容，需人工确认')
+  assert.equal(result.plan[0].reason, '文件存在但未记录快照哈希，可执行回滚（无法校验）')
+  assert.deepEqual(result.counts, { apply: 4, same: 0, modified: 0, missing: 0 })
+  assert.equal(result.summary, '4 个可回滚')
 })
 
-test('state 优先级：missing 高于 same；same 高于无 hash', () => {
+test('beforeHash 命中当前内容 → same（即使有行变更）；支持 baseHash / prevHash', () => {
+  const result = planRollback([
+    { path: 'back.js', added: 3, deleted: 1, beforeHash: 'TARGET' },
+    { path: 'back2.js', added: 3, deleted: 1, baseHash: 'TARGET' },
+    { path: 'back3.js', added: 3, deleted: 1, prevHash: 'TARGET' },
+  ], {
+    'back.js': 'target',
+    'back2.js': 'TARGET',
+    'back3.js': ' target ',
+  })
+  assert.deepEqual(result.plan.map(item => item.state), ['same', 'same', 'same'])
+  assert.equal(result.plan[0].reason, '当前内容已是回滚目标，无需回滚')
+  assert.deepEqual(result.counts, { apply: 0, same: 3, modified: 0, missing: 0 })
+  assert.equal(result.summary, '3 个无需回滚')
+})
+
+test('变更后哈希支持 sha256 / afterHash / postHash 别名', () => {
+  const result = planRollback([
+    { path: 'a.js', added: 1, deleted: 0, sha256: 'H' },
+    { path: 'b.js', added: 1, deleted: 0, afterHash: 'H' },
+    { path: 'c.js', added: 1, deleted: 0, postHash: 'H' },
+    { path: 'd.js', added: 1, deleted: 0, afterHash: 'other' },
+  ], {
+    'a.js': 'h',
+    'b.js': 'h',
+    'c.js': 'h',
+    'd.js': 'h',
+  })
+  assert.deepEqual(result.plan.map(item => item.state), ['apply', 'apply', 'apply', 'modified'])
+})
+
+test('state 优先级：missing 高于 same；same 高于无 hash / apply', () => {
   const result = planRollback([
     { path: 'gone.md', added: 0, deleted: 0, hash: 'h' },
     { path: 'kept.md', added: 0, deleted: 0 },
@@ -152,8 +185,8 @@ test('summary：按 state 固定顺序拼接，零项不出现', () => {
     'f.txt': 'exists',
     'g.json': null,
   })
-  assert.deepEqual(result.counts, { apply: 3, same: 1, modified: 2, missing: 1 })
-  assert.equal(result.summary, '3 个可回滚，1 个无需回滚，2 个已被修改，1 个已不存在')
+  assert.deepEqual(result.counts, { apply: 4, same: 1, modified: 1, missing: 1 })
+  assert.equal(result.summary, '4 个可回滚，1 个无需回滚，1 个已被修改，1 个已不存在')
 })
 
 test('counts 始终包含四个 state 键', () => {

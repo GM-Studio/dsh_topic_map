@@ -37,7 +37,9 @@ function setup() {
     REVEAL_TOP_PAD: 8, JUMP_TRACE: null,
     window: { setTimeout: fn => timers.push(fn), requestAnimationFrame: fn => timers.push(fn) },
   }
-  const jump = new Function(...Object.keys(env), extract('jumpTo') + ';return jumpTo')(...Object.values(env))
+  // 落点实现已提到模块级 pinRowToTop（历史右栏复用），抽取时一并带上，
+  // 否则 eval 出来的 jumpTo → pinToTop 找不到它。
+  const jump = new Function(...Object.keys(env), extract('pinRowToTop') + '\n' + extract('jumpTo') + ';return jumpTo')(...Object.values(env))
   return { jump, calls, loads, timers, scene, env, tick() { timers.splice(0).forEach(f => f()) } }
 }
 

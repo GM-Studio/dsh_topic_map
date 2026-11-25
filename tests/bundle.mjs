@@ -47,7 +47,7 @@ function usedNames(prefix) {
 console.log('\nbundle')
 
 // ── 嵌入模块 ────────────────────────────────────────────────────────
-for (const name of ['THEME', 'FILTER', 'PM', 'UISTATE', 'FOLD', 'DELIV', 'REPORT', 'GMODE', 'SCAT', 'HITVIEW']) {
+for (const name of ['THEME', 'FILTER', 'PM', 'UISTATE', 'FOLD', 'DELIV', 'REPORT', 'GMODE', 'SCAT', 'HITVIEW', 'CITE']) {
   test(`${name} 的导出覆盖客户端的全部使用`, () => {
     const block = moduleBlock(name)
     assert.ok(block !== null, `bundle 里找不到 ${name}，生成段缺失`)
@@ -131,6 +131,19 @@ test('SCAT 的会话识别能真实执行', () => {
 test('GMODE 嵌入后能真实执行', () => {
   const GMODE = evalEmbedded('GMODE')
   assert.ok(GMODE.statusColor('done', 0, 'light').includes('hsl('))
+})
+
+test('CITE 嵌入后能真实执行（引用块与预算）', () => {
+  const CITE = evalEmbedded('CITE')
+  const built = CITE.buildCite({
+    topic: '插件开发', title: '索引方案', turn: 7, sessionId: 'sess-1',
+    intent: '把索引做出来', points: ['先用倒排', '再补中文分词'],
+  })
+  assert.ok(built.text.includes('出处：session/sess-1#7'))
+  assert.ok(built.tokens > 0)
+  assert.deepEqual(CITE.parseCite(built.text), {
+    sessionId: 'sess-1', turn: 7, header: '〔引用〕插件开发 › 索引方案 · 第 7 轮',
+  })
 })
 
 console.log(`\n${passed} passed, ${failures.length} failed`)

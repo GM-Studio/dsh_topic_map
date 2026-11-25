@@ -100,8 +100,11 @@ function makeScene({ rowOffset = 1000, viewportHeight = 600 } = {}) {
 }
 
 function build(clock) {
+  // pinToTop 现在只做转发，实现在模块级 pinRowToTop（历史右栏复用同一套）。
+  // 抽取时两个都要带上，否则 eval 出来的 pinToTop 找不到 pinRowToTop。
   const factory = new Function(
     extractConst('REVEAL_TOP_PAD') +
+    '\n' + extract('pinRowToTop') +
     '\n' + extract('pinToTop') +
     '\nreturn pinToTop;',
   )

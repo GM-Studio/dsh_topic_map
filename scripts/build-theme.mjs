@@ -50,6 +50,8 @@ const REPORT_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/re
 const REPORT_END = '    // ══ 报告生成段结束 ══'
 const HITVIEW_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/hit-view.js'
 const HITVIEW_END = '    // ══ hit-view 生成段结束 ══'
+const CITE_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/cite.js'
+const CITE_END = '    // ══ cite 生成段结束 ══'
 
 const themeSrc = strip(readFileSync(join(root, 'lib', 'theme.js'), 'utf8'))
 const themeWrapped = [
@@ -219,6 +221,21 @@ const hitWrapped = [
   HITVIEW_END,
 ].join('\n')
 
+const citeSrc = strip(readFileSync(join(root, 'lib', 'cite.js'), 'utf8'))
+const citeWrapped = [
+  CITE_START,
+  '    // 引用块构造/反解（A-4），纯函数，独立测试过（tests/cite.mjs）。',
+  '    // 导出清单手写：客户端用了哪个名字就必须在这里导出一个，否则白屏。',
+  '    var CITE = (function () {',
+  indent(citeSrc),
+  '      return {',
+  '        buildCite: buildCite, estimateTokens: estimateTokens, parseCite: parseCite,',
+  '        citeBudgetOf: citeBudgetOf, stripBody: stripBody,',
+  '      }',
+  '    })()',
+  CITE_END,
+].join('\n')
+
 const clientPath = join(root, 'lib', 'client.js')
 let client = readFileSync(clientPath, 'utf8')
 
@@ -255,6 +272,7 @@ console.log('report:', splice(REPORT_START, REPORT_END, reportWrapped, DELIV_END
 console.log('graph-mode:', splice(GMODE_START, GMODE_END, gmWrapped, REPORT_END))
 console.log('session-category:', splice(SCAT_START, SCAT_END, scatWrapped, GMODE_END))
 console.log('hit-view:', splice(HITVIEW_START, HITVIEW_END, hitWrapped, SCAT_END))
+console.log('cite:', splice(CITE_START, CITE_END, citeWrapped, HITVIEW_END))
 
 writeFileSync(clientPath, client)
 console.log('已写入 lib/client.js')

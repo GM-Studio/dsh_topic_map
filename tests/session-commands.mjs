@@ -1,8 +1,10 @@
 /**
  * 会话命令清单端点测试（复制浮窗 A-2）。
  *
- * 锁编号口径（全会话连续、跨轮累计）、分页边界（首页/末页/越界）、
- * 索引缺失的日志兜底、以及"每轮 ≤8 条/每条 ≤500 字"的索引事实不被二次截断。
+ * 新口径：只提取 assistant 回答里的 markdown 围栏代码块，一条命令 = 一个
+ * 代码块（text 保留换行）；tool/call 产生的命令完全不出现。
+ * 锁：多块顺序、跨轮 seq、围栏解析（语言/无语言/嵌套反引号）、q/lang 过滤
+ * 先于分页、索引缺失兜底、错误文案。
  *
  * Run: node tests/session-commands.mjs
  */
@@ -29,7 +31,12 @@ async function test(name, fn) {
 const BASE_TIME = 1_700_000_000_000
 const SESSION = 'session-4c42ff36-aaaa-4bbb-8ccc-000000000001'
 
-/** 造事件流：spec.commands 是这一轮依次执行的命令。 */
+/** 用代码块数组拼一条 assistant 回答。 */
+function responseOf(blocks) {
+  return blocks.map(block => `\`\`\`${block.lang ?? ''}\n${block.text}\n\`\`\``).join('\n\n')
+}
+
+/** 造事件流：spec.blocks 是回答里的代码块；spec.commands 是故意混入的 tool 命令。 */
 function makeEvents(specs) {
   let seq = 0
   const events = []
@@ -45,10 +52,11 @@ function makeEvents(specs) {
     for (const command of spec.commands ?? []) {
       push('tool/call', { name: 'ops_bash', arguments: JSON.stringify({ command }) }, start + 200)
     }
+    const response = spec.response ?? responseOf(spec.blocks ?? [])
     push('assistant/message', {
       message: {
         role: 'assistant',
-        content: [{ type: 'text', text: `第 ${turn} 轮回答` }],
+        content: [{ type: 'text', text: response }],
         source: { kind: 'model', provider: 'agent2api', model: 'DeepSeek-Flash' },
       },
     }, start + 1000)
@@ -91,92 +99,195 @@ async function withTempHome(fn) {
 
 console.log('\nsession-commands')
 
-await test('编号全会话连续、跨轮累计；ok 一律 null（索引没存成败）', async () => {
+await test('只提取回答代码块：tool 命令不出现，一条 = 一个块（保留换行）', async () => {
   await withTempHome(async () => {
-    const events = makeEvents([
-      { commands: ['npm test', 'npm run build'] },
-      { commands: [] },
-      { commands: ['git status', 'git diff', 'git log -1'] },
-    ])
-    const ctx = makeCtx({ events })
+    const ctx = makeCtx({
+      events: makeEvents([{
+        commands: ['tool-only-1', 'tool-only-2'],
+        blocks: [
+          { lang: 'bash', text: 'npm test\nnode scripts/test-all.mjs' },
+          { lang: '', text: 'plain\nline' },
+        ],
+      }]),
+    })
     await syncSessionIndexFor(ctx, SESSION)
 
     const result = await listSessionCommands(ctx, { sessionId: SESSION })
     assert.equal(result.ok, true, result.error)
-    const value = result.value
-    assert.equal(value.total, 5)
-    assert.equal(value.offset, 0)
-    assert.equal(value.limit, 20)
-    assert.equal(value.hasMore, false)
-    assert.deepEqual(value.commands.map(item => item.seq), [1, 2, 3, 4, 5])
-    assert.deepEqual(value.commands.map(item => item.turn), [0, 0, 2, 2, 2])
-    assert.deepEqual(value.commands.map(item => item.text), [
-      'npm test', 'npm run build', 'git status', 'git diff', 'git log -1',
+    assert.equal(result.value.total, 2)
+    assert.deepEqual(result.value.commands, [
+      { seq: 1, turn: 0, lang: 'bash', text: 'npm test\nnode scripts/test-all.mjs' },
+      { seq: 2, turn: 0, lang: '', text: 'plain\nline' },
     ])
-    assert.deepEqual(value.commands.map(item => item.ok), [null, null, null, null, null])
+    assert.equal(result.value.commands.some(item => item.text.includes('tool-only')), false,
+      'tool/call 的命令绝不能出现在结果里')
+    for (const command of result.value.commands) {
+      assert.equal('source' in command, false, '新响应不应再有 source')
+      assert.equal('ok' in command, false, '新响应不应再有 ok')
+    }
   })
 })
 
-await test('分页边界：第一页 / 最后一页 / 越界 / 默认值', async () => {
+await test('多块按出现顺序；跨轮 seq 全局连续', async () => {
   await withTempHome(async () => {
-    const events = makeEvents([
-      { commands: ['a', 'b'] },
-      { commands: ['c'] },
-      { commands: ['d', 'e'] },
-    ])
-    const ctx = makeCtx({ events })
+    const ctx = makeCtx({
+      events: makeEvents([
+        { blocks: [{ lang: 'bash', text: 'a' }, { lang: 'js', text: 'b' }] },
+        { blocks: [] },
+        { blocks: [{ lang: 'python', text: 'c' }, { lang: '', text: 'd' }] },
+      ]),
+    })
     await syncSessionIndexFor(ctx, SESSION)
 
-    const first = await listSessionCommands(ctx, { sessionId: SESSION, offset: 0, limit: 2 })
-    assert.deepEqual(first.value.commands.map(item => item.seq), [1, 2])
-    assert.equal(first.value.hasMore, true)
+    const result = await listSessionCommands(ctx, { sessionId: SESSION })
+    assert.equal(result.value.total, 4)
+    assert.deepEqual(result.value.commands.map(item => item.seq), [1, 2, 3, 4])
+    assert.deepEqual(result.value.commands.map(item => item.turn), [0, 0, 2, 2])
+    assert.deepEqual(result.value.commands.map(item => item.lang), ['bash', 'js', 'python', ''])
+    assert.deepEqual(result.value.commands.map(item => item.text), ['a', 'b', 'c', 'd'])
+  })
+})
 
-    const last = await listSessionCommands(ctx, { sessionId: SESSION, offset: 4, limit: 2 })
-    assert.deepEqual(last.value.commands.map(item => item.seq), [5])
-    assert.deepEqual(last.value.commands.map(item => item.text), ['e'])
+await test('围栏解析：带语言 / 无语言 / 4 反引号嵌套 / 未闭合忽略', async () => {
+  await withTempHome(async () => {
+    const response = [
+      '说明文字不算。',
+      '```bash',
+      'echo hi',
+      '```',
+      '```',
+      'no lang',
+      '```',
+      '````',
+      '```js',
+      'inner ``` fence stays',
+      '```',
+      '````',
+      '```ts title="示例"',
+      'const a = 1',
+      '```',
+      '```bash',
+      'unclosed-should-not-appear',
+    ].join('\n')
+    const ctx = makeCtx({ events: makeEvents([{ response }]) })
+    await syncSessionIndexFor(ctx, SESSION)
+
+    const result = await listSessionCommands(ctx, { sessionId: SESSION })
+    assert.equal(result.value.total, 4)
+    assert.deepEqual(result.value.commands.map(item => item.lang), ['bash', '', '', 'ts'])
+    assert.deepEqual(result.value.commands.map(item => item.text), [
+      'echo hi',
+      'no lang',
+      '```js\ninner ``` fence stays\n```',
+      'const a = 1',
+    ])
+    assert.equal(result.value.commands.some(item => item.text.includes('unclosed')), false)
+  })
+})
+
+await test('块内容不截断：多行/超长完整返回', async () => {
+  await withTempHome(async () => {
+    const long = `${'x'.repeat(600)}\n${'y'.repeat(600)}`
+    const ctx = makeCtx({ events: makeEvents([{ blocks: [{ lang: 'text', text: long }] }]) })
+    await syncSessionIndexFor(ctx, SESSION)
+
+    const result = await listSessionCommands(ctx, { sessionId: SESSION })
+    assert.equal(result.value.total, 1)
+    assert.equal(result.value.commands[0].text, long)
+    assert.equal(result.value.commands[0].text.length, 1201)
+  })
+})
+
+await test('分页边界与 limit 封顶 100', async () => {
+  await withTempHome(async () => {
+    const specs = Array.from({ length: 13 }, (_, turn) => ({
+      blocks: Array.from({ length: 8 }, (_, index) => ({
+        lang: 'bash',
+        text: `cmd-${turn}-${index}`,
+      })),
+    }))
+    const ctx = makeCtx({ events: makeEvents(specs) })
+    await syncSessionIndexFor(ctx, SESSION)
+
+    const page = await listSessionCommands(ctx, { sessionId: SESSION, offset: 0, limit: 2 })
+    assert.deepEqual(page.value.commands.map(item => item.seq), [1, 2])
+    assert.equal(page.value.hasMore, true)
+
+    const last = await listSessionCommands(ctx, { sessionId: SESSION, offset: 102, limit: 2 })
+    assert.deepEqual(last.value.commands.map(item => item.seq), [103, 104])
     assert.equal(last.value.hasMore, false)
 
     const beyond = await listSessionCommands(ctx, { sessionId: SESSION, offset: 999, limit: 20 })
     assert.deepEqual(beyond.value.commands, [])
-    assert.equal(beyond.value.total, 5)
+    assert.equal(beyond.value.total, 104)
     assert.equal(beyond.value.hasMore, false)
 
-    const defaults = await listSessionCommands(ctx, { sessionId: SESSION, offset: -3, limit: 0 })
-    assert.equal(defaults.value.offset, 0)
-    assert.equal(defaults.value.limit, 20)
-    assert.equal(defaults.value.commands.length, 5)
+    const capped = await listSessionCommands(ctx, { sessionId: SESSION, limit: 999 })
+    assert.equal(capped.value.limit, 100)
+    assert.equal(capped.value.commands.length, 100)
+    assert.equal(capped.value.hasMore, true)
   })
 })
 
-await test('limit 封顶 100', async () => {
+await test('q / lang 过滤先于分页；total 为过滤后总数', async () => {
   await withTempHome(async () => {
-    const specs = Array.from({ length: 13 }, (_, turn) => ({
-      commands: Array.from({ length: 8 }, (_, index) => `cmd-${turn}-${index}`),
-    }))
-    const events = makeEvents(specs)
-    const ctx = makeCtx({ events })
+    const ctx = makeCtx({
+      events: makeEvents([
+        { blocks: [{ lang: 'bash', text: 'npm test' }, { lang: 'js', text: 'console.log(1)' }] },
+        { blocks: [{ lang: '', text: 'plain text' }] },
+        { blocks: [{ lang: 'bash', text: 'npm run build' }, { lang: 'python', text: 'print(1)' }] },
+      ]),
+    })
     await syncSessionIndexFor(ctx, SESSION)
 
-    const result = await listSessionCommands(ctx, { sessionId: SESSION, limit: 999 })
-    assert.equal(result.value.total, 104)
-    assert.equal(result.value.limit, 100)
-    assert.equal(result.value.commands.length, 100)
-    assert.equal(result.value.hasMore, true)
-    assert.equal(result.value.commands[99].seq, 100)
+    const all = await listSessionCommands(ctx, { sessionId: SESSION })
+    assert.equal(all.value.total, 5)
 
-    const tail = await listSessionCommands(ctx, { sessionId: SESSION, offset: 100, limit: 10 })
-    assert.deepEqual(tail.value.commands.map(item => item.seq), [101, 102, 103, 104])
-    assert.equal(tail.value.hasMore, false)
+    const bash = await listSessionCommands(ctx, { sessionId: SESSION, lang: 'bash' })
+    assert.equal(bash.value.total, 2)
+    assert.deepEqual(bash.value.commands.map(item => item.seq), [1, 4])
+    assert.deepEqual(bash.value.commands.map(item => item.lang), ['bash', 'bash'])
+
+    const unlabeled = await listSessionCommands(ctx, { sessionId: SESSION, lang: '' })
+    assert.equal(unlabeled.value.total, 1)
+    assert.deepEqual(unlabeled.value.commands.map(item => item.seq), [3])
+
+    const js = await listSessionCommands(ctx, { sessionId: SESSION, lang: 'js' })
+    assert.equal(js.value.total, 1)
+    assert.equal(js.value.commands[0].text, 'console.log(1)')
+
+    const byQuery = await listSessionCommands(ctx, { sessionId: SESSION, q: 'NPM' })
+    assert.equal(byQuery.value.total, 2, 'q 应大小写不敏感')
+    assert.deepEqual(byQuery.value.commands.map(item => item.seq), [1, 4])
+
+    const both = await listSessionCommands(ctx, { sessionId: SESSION, q: 'npm', lang: 'bash' })
+    assert.equal(both.value.total, 2)
+
+    // 过滤后分页：q 命中 2 条，offset=1 limit=1 只取第 2 条。
+    const page = await listSessionCommands(ctx, { sessionId: SESSION, q: 'npm', offset: 1, limit: 1 })
+    assert.deepEqual(page.value.commands.map(item => item.seq), [4])
+    assert.equal(page.value.total, 2)
+    assert.equal(page.value.hasMore, false)
+
+    const beyond = await listSessionCommands(ctx, { sessionId: SESSION, q: 'npm', offset: 2, limit: 5 })
+    assert.deepEqual(beyond.value.commands, [])
+    assert.equal(beyond.value.total, 2)
+    assert.equal(beyond.value.hasMore, false)
+
+    // 缺省/非法 lang 退回全部。
+    const fallback = await listSessionCommands(ctx, { sessionId: SESSION, lang: '*' })
+    assert.equal(fallback.value.total, 5)
   })
 })
 
-await test('索引缺失时走日志兜底，编号与分页一致', async () => {
+await test('索引缺失时走日志兜底，结果一致', async () => {
   await withTempHome(async () => {
-    const events = makeEvents([
-      { commands: ['echo 1'] },
-      { commands: ['echo 2', 'echo 3'] },
-    ])
-    const ctx = makeCtx({ events })
+    const ctx = makeCtx({
+      events: makeEvents([
+        { blocks: [{ lang: 'bash', text: 'echo 1' }] },
+        { blocks: [{ lang: 'js', text: 'echo 2' }, { lang: '', text: 'echo 3' }] },
+      ]),
+    })
     // 不建索引。
     const result = await listSessionCommands(ctx, { sessionId: SESSION, offset: 1, limit: 2 })
     assert.equal(result.ok, true, result.error)
@@ -186,24 +297,16 @@ await test('索引缺失时走日志兜底，编号与分页一致', async () =>
   })
 })
 
-await test('500 字命令原样返回（索引已截断，端点不再二次截断）', async () => {
+await test('没有围栏 → 空结果；非法 sessionId 400；读不到 502', async () => {
   await withTempHome(async () => {
-    const long = 'x'.repeat(600)
-    const events = makeEvents([{ commands: [long] }])
-    const ctx = makeCtx({ events })
-    await syncSessionIndexFor(ctx, SESSION)
+    const noFences = makeCtx({ events: makeEvents([{ response: '只有普通回答，没有代码块' }]) })
+    await syncSessionIndexFor(noFences, SESSION)
+    const empty = await listSessionCommands(noFences, { sessionId: SESSION })
+    assert.equal(empty.ok, true)
+    assert.equal(empty.value.total, 0)
+    assert.deepEqual(empty.value.commands, [])
 
-    const result = await listSessionCommands(ctx, { sessionId: SESSION })
-    const [command] = result.value.commands
-    assert.equal(command.text.length, 500)
-    assert.equal(command.text, long.slice(0, 500))
-  })
-})
-
-await test('非法 sessionId 400；会话读不到有明确错误', async () => {
-  await withTempHome(async () => {
-    const ctx = makeCtx({ events: makeEvents([{ commands: ['a'] }]) })
-    const invalid = await listSessionCommands(ctx, { sessionId: '   ' })
+    const invalid = await listSessionCommands(noFences, { sessionId: '   ' })
     assert.equal(invalid.ok, false)
     assert.equal(invalid.httpStatus, 400)
 
@@ -222,7 +325,7 @@ await test('非法 sessionId 400；会话读不到有明确错误', async () => 
   })
 })
 
-console.log(`\n${passed} passed, ${failures.length} failed`)
+console.log(`\n${passed} passed, ${failures.length} failures`)
 if (failures.length > 0) {
   for (const failure of failures) console.error(`\n${failure.name}\n${failure.error.stack}`)
   process.exit(1)

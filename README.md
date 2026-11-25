@@ -152,7 +152,7 @@ Host 半只提供 `/api/topic-map/*` 的一组端点。面板**不碰你的对�
 | `POST /search` | 跨会话**轮次级**检索：可传 `sessionId` 反解工作区；返回 hits/total/truncated/scanned/coverage/workspace |
 | `POST /workspace-reindex` | 整工区一键补齐索引，立即返回 `queued`（后台并发 2） |
 | `POST /turn-digest` | 单轮摘要（≤400 字），按 revision 缓存；`force` 重算 |
-| `POST /session-commands` | 会话内的 **markdown 代码块**清单（不含工具执行命令）：`{seq,turn,lang,text}`，支持 `q` 与 `lang` 筛选、分页 |
+| `POST /session-commands` | 会话内的 **markdown 代码块**清单（不含工具执行命令）：`{seq,turn,lang,text}`，支持 `q`、`lang`（`shell` 语言组）筛选与分页 |
 | `POST /turn-detail` | 单轮详情：完整问答、用量、命令、文件变更 + 前后邻居 + 标签（索引命中约 0.5ms，17 字段） |
 | `POST /index-build` | 索引维护：按会话或工作区重建（完整校验，可自愈） |
 | `POST /labels` | 标签读取：工作区全量，或按 `sessionId+turn` 取单条（同一 map 形状） |

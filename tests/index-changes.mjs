@@ -14,8 +14,13 @@ import { strict as assert } from 'node:assert'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { syncSessionIndexFor } from '../lib/index.js'
-import { parseIndexText, syncSessionIndex } from '../lib/turn-index.js'
+import { buildSessionIndexes, inject, syncSessionIndexFor } from '../lib/index.js'
+import {
+  defaultSessionsDir,
+  parseIndexText,
+  readIndexFile,
+  syncSessionIndex,
+} from '../lib/turn-index.js'
 
 let passed = 0
 const failures = []
@@ -68,10 +73,23 @@ function changesSeqOf(events) {
 /** 假 Host context：事件流、revision、变更摘要服务都可注入。 */
 function makeHostCtx(options = {}) {
   const state = { revision: options.revision ?? 'rev-1' }
+  const events = options.events ?? []
   const ctx = {
+    get(name) {
+      if (name !== 'workspaceRegistry' || !Array.isArray(options.sessions)) return undefined
+      return {
+        list: () => [{
+          id: 'ws-1',
+          path: 'E:\\ws',
+          title: '工作区 A',
+          sessionIds: options.sessions,
+        }],
+      }
+    },
     sessionQuery: {
-      async readSession() {
-        return { events: options.events ?? [] }
+      async readSession(id) {
+        const list = Array.isArray(events) ? events : (events[id] ?? [])
+        return { events: list }
       },
     },
     sessionPersistence: {
@@ -92,6 +110,20 @@ async function withTempDir(fn) {
     return await fn(dir)
   } finally {
     await rm(dir, { recursive: true, force: true })
+  }
+}
+
+/** 临时 home（/index-build 这类走默认索引目录的用例用）。 */
+async function withTempHome(fn) {
+  const home = await mkdtemp(join(tmpdir(), 'index-changes-home-'))
+  const saved = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    return await fn(home)
+  } finally {
+    if (saved === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = saved
+    await rm(home, { recursive: true, force: true })
   }
 }
 
@@ -251,6 +283,47 @@ await test('宿主没有 workspaceChanges 服务：同样留 lost:true', async (
     const changed = await changesOfTurn(result.path, 0)
     assert.equal(changed.row.changes.lost, true)
   })
+})
+
+await test('未 inject 的严格服务代理（访问即抛）：整批不 failed，写 lost:true', async () => {
+  await withTempHome(async () => {
+    const ids = ['sess-a', 'sess-b', 'sess-c']
+    const events = Object.fromEntries(ids.map(id => [
+      id,
+      makeEvents([{ prompt: '改过文件', changes: true }]),
+    ]))
+    const { ctx } = makeHostCtx({ events, sessions: ids })
+    // 复刻 Cordis 严格代理：属性访问直接抛，而不是返回 undefined。
+    Object.defineProperty(ctx, 'workspaceChanges', {
+      configurable: true,
+      get() {
+        throw new Error('cannot get property "workspaceChanges" without inject')
+      },
+    })
+
+    const batch = await buildSessionIndexes(ctx, { workspaceId: 'ws-1' })
+    assert.equal(batch.failed, 0, `整批不应失败：${JSON.stringify(batch.sessions)}`)
+    assert.equal(batch.built, 3)
+    assert.deepEqual(batch.sessions.map(item => item.status), ['built', 'built', 'built'])
+
+    const built = await readIndexFile(defaultSessionsDir(), 'sess-a')
+    assert.equal(built.ok, true)
+    const changed = built.turns.find(row => row.turn === 0)
+    assert.deepEqual(changed.changes, {
+      files: [],
+      total: 0,
+      added: 0,
+      deleted: 0,
+      lost: true,
+    })
+  })
+})
+
+await test('inject 声明包含 workspaceChanges（Cordis 严格代理要求）', () => {
+  assert.ok(
+    inject.includes('workspaceChanges'),
+    `inject 未声明 workspaceChanges：${JSON.stringify(inject)}`,
+  )
 })
 
 await test('summary 抛错：索引照常落盘，该轮记 lost:true', async () => {

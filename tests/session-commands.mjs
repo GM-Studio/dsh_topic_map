@@ -280,6 +280,49 @@ await test('q / lang 过滤先于分页；total 为过滤后总数', async () =>
   })
 })
 
+await test('lang:shell 语言组：命中 shell 类、不命中 js/python/无标注', async () => {
+  await withTempHome(async () => {
+    const blocks = [
+      { lang: 'bash', text: 'npm test' },
+      { lang: 'SH', text: 'echo sh' },
+      { lang: 'powershell', text: 'Get-ChildItem' },
+      { lang: 'ps1', text: 'Write-Host' },
+      { lang: 'bat', text: 'dir' },
+      { lang: 'cmd', text: 'echo cmd' },
+      { lang: 'zsh', text: 'echo zsh' },
+      { lang: 'shell', text: 'sh' },
+      { lang: 'console', text: 'npm run build' },
+      { lang: 'js', text: 'console.log(1)' },
+      { lang: 'python', text: 'print(1)' },
+      { lang: '', text: 'plain text' },
+    ]
+    const ctx = makeCtx({ events: makeEvents([{ blocks }]) })
+    await syncSessionIndexFor(ctx, SESSION)
+
+    const shell = await listSessionCommands(ctx, { sessionId: SESSION, lang: 'shell' })
+    assert.equal(shell.value.total, 9, 'shell 组应只含白名单语言')
+    assert.deepEqual(shell.value.commands.map(item => item.seq), [1, 2, 3, 4, 5, 6, 7, 8, 9])
+    assert.deepEqual(shell.value.commands.map(item => item.lang), [
+      'bash', 'SH', 'powershell', 'ps1', 'bat', 'cmd', 'zsh', 'shell', 'console',
+    ])
+    assert.equal(shell.value.commands.some(item => item.lang === 'js'), false)
+    assert.equal(shell.value.commands.some(item => item.lang === 'python'), false)
+    assert.equal(shell.value.commands.some(item => item.lang === ''), false)
+
+    const upper = await listSessionCommands(ctx, { sessionId: SESSION, lang: 'SHELL' })
+    assert.equal(upper.value.total, 9, '特殊值本身也应大小写不敏感')
+
+    const withQuery = await listSessionCommands(ctx, { sessionId: SESSION, lang: 'shell', q: 'NPM' })
+    assert.equal(withQuery.value.total, 2, 'q 与 shell 组组合后 total 应为组内过滤结果')
+    assert.deepEqual(withQuery.value.commands.map(item => item.seq), [1, 9])
+
+    // 精确语言值行为不变：bash 只命中 bash，不把 shell 组全带出来。
+    const exact = await listSessionCommands(ctx, { sessionId: SESSION, lang: 'bash' })
+    assert.equal(exact.value.total, 1)
+    assert.equal(exact.value.commands[0].seq, 1)
+  })
+})
+
 await test('索引缺失时走日志兜底，结果一致', async () => {
   await withTempHome(async () => {
     const ctx = makeCtx({

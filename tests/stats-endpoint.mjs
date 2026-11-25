@@ -145,17 +145,20 @@ await test('正常：会话/轮次/活跃日/topSessions/用量', async () => {
   assert.equal(result.value.sessions, 2)
   assert.equal(result.value.turns, 4)
   assert.equal(result.value.activeDays, 2, '1/5 两轮 + 1/6 两轮，只算 2 个自然日')
+  assert.equal(result.value.sortBy, 'turns')
   assert.deepEqual(result.value.topSessions[0], {
     sessionId: SESSION_A,
     title: '会话甲',
     turns: 3,
     lastActive: localTime(2026, 1, 6, 9) + 5000,
+    tokens: 340,
   })
   assert.deepEqual(result.value.topSessions[1], {
     sessionId: SESSION_B,
     title: '会话乙',
     turns: 1,
     lastActive: localTime(2026, 1, 6, 11) + 5000,
+    tokens: 260,
   })
   assert.deepEqual(result.value.usage, { input: 450, output: 150, total: 600 })
 })
@@ -187,9 +190,104 @@ await test('排序边界：同轮数按最后活动倒序，topSessions 最多 5
   const ctx = makeCtx({ events, sessionIds: ids })
   const result = await readWorkspaceStats(ctx, { workspaceId: WS })
   assert.equal(result.ok, true, result.error)
+  assert.equal(result.value.sortBy, 'turns', '默认 sortBy 是 turns')
   assert.equal(result.value.topSessions.length, 5)
   assert.equal(result.value.topSessions[0].sessionId, ids[6], '最后活动的同轮数会话排第一')
   assert.equal(result.value.topSessions[4].sessionId, ids[2])
+  assert.ok(result.value.topSessions.every(item => item.tokens === 0))
+})
+
+await test('tokens 求和：多轮累加、单轮缺失按 0、结果为整数', async () => {
+  const id = 'session-bbbb0000-0000-4000-8000-000000000001'
+  const ctx = makeCtx({
+    events: {
+      [id]: makeEvents([
+        { usage: { inputTokens: 10, outputTokens: 5 } },
+        {}, // 没有 usage → 0
+        { usage: { inputTokens: 2.9, outputTokens: 7.2 } },
+      ]),
+    },
+    sessionIds: [id],
+  })
+  const result = await readWorkspaceStats(ctx, { workspaceId: WS })
+  assert.equal(result.ok, true, result.error)
+  assert.equal(result.value.topSessions[0].tokens, 25)
+  assert.ok(Number.isInteger(result.value.topSessions[0].tokens))
+})
+
+await test('sortBy=tokens：先按 token 倒序再截断前 5（第 6 名 token 最小但轮数最多也被截掉）', async () => {
+  const ids = []
+  const events = {}
+  const tokenTotals = [600, 500, 400, 300, 200, 100]
+  tokenTotals.forEach((total, index) => {
+    const id = `session-cccc0000-0000-4000-8000-00000000000${index}`
+    ids.push(id)
+    if (index === 5) {
+      // token 最少，但轮数最多、lastActive 最新：按轮数排它会是第一。
+      events[id] = makeEvents(Array.from({ length: 10 }, (_, turn) => ({
+        start: localTime(2026, 5, 1, 10) + turn * 1000,
+        usage: { inputTokens: 5, outputTokens: 5 },
+      })))
+    } else {
+      events[id] = makeEvents([{
+        start: localTime(2026, 5, 1, 10) + index * 1000,
+        usage: { inputTokens: total, outputTokens: 0 },
+      }])
+    }
+  })
+  const ctx = makeCtx({ events, sessionIds: ids })
+
+  const byTokens = await readWorkspaceStats(ctx, { workspaceId: WS, sortBy: 'tokens' })
+  assert.equal(byTokens.ok, true, byTokens.error)
+  assert.equal(byTokens.value.sortBy, 'tokens')
+  assert.deepEqual(byTokens.value.topSessions.map(item => item.sessionId), ids.slice(0, 5))
+  assert.deepEqual(byTokens.value.topSessions.map(item => item.tokens), [600, 500, 400, 300, 200])
+  assert.ok(byTokens.value.topSessions.every(item => Number.isInteger(item.tokens)))
+
+  // 默认按轮数排序时，最后那个 10 轮会话必须进入前 5（证明 tokens 排序在截断前完成）。
+  const byTurns = await readWorkspaceStats(ctx, { workspaceId: WS })
+  assert.equal(byTurns.value.sortBy, 'turns')
+  assert.equal(byTurns.value.topSessions[0].sessionId, ids[5])
+  assert.ok(byTurns.value.topSessions.some(item => item.sessionId === ids[5]))
+})
+
+await test('sortBy=tokens：token 相同按 lastActive 倒序', async () => {
+  const early = 'session-dddd0000-0000-4000-8000-000000000001'
+  const late = 'session-dddd0000-0000-4000-8000-000000000002'
+  const ctx = makeCtx({
+    events: {
+      [early]: makeEvents([
+        { start: localTime(2026, 6, 1, 9), usage: { inputTokens: 50, outputTokens: 50 } },
+        { start: localTime(2026, 6, 1, 10), usage: { inputTokens: 50, outputTokens: 50 } },
+      ]),
+      [late]: makeEvents([
+        { start: localTime(2026, 6, 2, 9), usage: { inputTokens: 150, outputTokens: 50 } },
+      ]),
+    },
+    sessionIds: [early, late],
+  })
+  const result = await readWorkspaceStats(ctx, { workspaceId: WS, sortBy: 'tokens' })
+  assert.equal(result.ok, true, result.error)
+  assert.deepEqual(result.value.topSessions.map(item => item.sessionId), [late, early])
+  assert.deepEqual(result.value.topSessions.map(item => item.tokens), [200, 200])
+  assert.deepEqual(result.value.topSessions.map(item => item.turns), [1, 2])
+})
+
+await test('非法 sortBy 回落 turns，行为与默认一致', async () => {
+  const ids = ['session-eeee0000-0000-4000-8000-000000000001', 'session-eeee0000-0000-4000-8000-000000000002']
+  const events = {
+    [ids[0]]: makeEvents([{}, {}]),
+    [ids[1]]: makeEvents([{ usage: { inputTokens: 999, outputTokens: 0 } }]),
+  }
+  const ctx = makeCtx({ events, sessionIds: ids })
+  const fallback = await readWorkspaceStats(ctx, { workspaceId: WS, sortBy: 'bogus' })
+  const numeric = await readWorkspaceStats(ctx, { workspaceId: WS, sortBy: 123 })
+  const normal = await readWorkspaceStats(ctx, { workspaceId: WS })
+  assert.equal(fallback.value.sortBy, 'turns')
+  assert.equal(numeric.value.sortBy, 'turns')
+  assert.deepEqual(fallback.value.topSessions, normal.value.topSessions)
+  assert.deepEqual(numeric.value.topSessions, normal.value.topSessions)
+  assert.equal(fallback.value.topSessions[0].sessionId, ids[0], '轮数多的仍排第一')
 })
 
 await test('索引优先 + 日志兜底：索引会话不读日志，缺失会话读日志', async () => {
@@ -237,6 +335,7 @@ await test('空工作区：零值而不是报错', async () => {
     activeDays: 0,
     topSessions: [],
     usage: { input: 0, output: 0, total: 0 },
+    sortBy: 'turns',
   })
 })
 
@@ -288,6 +387,7 @@ await test('标题不可用/用量缺失：退回 sessionId、用量记 0', asyn
   const result = await readWorkspaceStats(ctx, { workspaceId: WS })
   assert.equal(result.ok, true, result.error)
   assert.equal(result.value.topSessions[0].title, SESSION_A)
+  assert.equal(result.value.topSessions[0].tokens, 0, 'usage 缺失/非法记 0')
   assert.deepEqual(result.value.usage, { input: 0, output: 0, total: 0 })
 })
 

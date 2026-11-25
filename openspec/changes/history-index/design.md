@@ -73,8 +73,10 @@ schema < 3 的索引一律判过期：消费端先走日志兜底（结果立刻
   响应回传 `workspace/workspaceId` 与 `coverage{sessions,indexed,scannedFromLog,indexing}`。
 - **补齐索引**：检索命中未建索引的会话时逐个入队（并发 2、在途去重、60 秒节流）；
   `POST /workspace-reindex {workspaceId}` 一键排空整工区，**不受节流**，立即返回 `queued`。
-- **会话命令**：`POST /session-commands {sessionId, offset?, limit?}` → `{total,offset,limit,hasMore,commands[{seq,turn,text,ok}]}`；
-  `seq` 跨轮连续、从 1 起；`limit` 封顶 100；`ok` 恒 `null`（索引没存每条命令的成败，**不编造**）。
+- **会话代码块**：`POST /session-commands {sessionId, offset?, limit?, q?, lang?}` → `{total,offset,limit,hasMore,commands[{seq,turn,lang,text}]}`。
+  **只取 assistant 回答里的 markdown 围栏代码块**（工具执行命令不算——那是动作，不是对话内容）；
+  一条 = 一个代码块，`text` 保留换行不截断，所有语言都收，`lang` 为围栏标注（无标注 `''`）；
+  `q` 子串、`lang` 精确（`'*'` 全部），**过滤先于分页**；`limit` 封顶 100。
 - 逐条 `indexOf` 线性扫描，不做倒排：1 万轮 ≈ 10MB，中文子串 20–60ms，满足 S-7。
 - 超过 5 万轮打性能日志，仍可用。
 - 只回片段与元信息；全文要显式请求单轮。

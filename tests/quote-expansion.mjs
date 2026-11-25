@@ -231,7 +231,7 @@ await test('同一句柄去重；多个句柄按出现顺序展开', async () =>
     })
     await syncSessionIndexFor(ctx, TARGET_DEDUPE)
     const agent = makeAgent({
-      texts: ['看 〔4c42ff37#1〕 和 〔4c42ff37#0〕', '再看一次 〔4c42ff37#1〕'],
+      texts: ['看 〔4c42ff37#1〕 和 〔4c42ff37#0〕，再看一次 〔4c42ff37#1〕'],
     })
     const text = await expandQuoteHandlesForAgent(ctx, agent)
     assert.equal(countBlocks(text), 2)
@@ -289,7 +289,7 @@ await test('轮次不存在 / 读取失败：给出可读说明而不是抛错',
       },
     })
     const unreadable = await expandQuoteHandlesForAgent(broken, makeAgent({ texts: ['〔4c42ff39#0〕'] }))
-    assert.ok(unreadable.includes('读取会话失败'), unreadable)
+    assert.ok(unreadable.includes('这个会话已归档，内容读不到'), unreadable)
   })
 })
 
@@ -328,7 +328,7 @@ await test('摘要生成失败：降级为回答前 400 字并标注，插入不
   })
 })
 
-await test('摘要 ≤400 字、最多 3 个句柄', async () => {
+await test('摘要 ≤400 字、四个句柄都展开（默认配额内）', async () => {
   await withTempHome(async () => {
     const long = '答'.repeat(20000)
     const ctx = makeCtx({
@@ -348,9 +348,9 @@ await test('摘要 ≤400 字、最多 3 个句柄', async () => {
       texts: ['〔4c42ff3a#0〕 〔4c42ff3a#1〕 〔4c42ff3a#2〕 〔4c42ff3a#3〕'],
     })
     const text = await expandQuoteHandlesForAgent(ctx, agent)
-    assert.equal(countBlocks(text), 3, '最多展开 3 个句柄')
+    assert.equal(countBlocks(text), 4, '默认配额 5 条，四个句柄都应展开')
     assert.equal(text.includes('要'.repeat(401)), false, '摘要应封顶 400 字')
-    assert.ok(text.length < 2000, `摘要总量不应回到全文量级：${text.length}`)
+    assert.ok(text.length < 3000, `摘要总量不应回到全文量级：${text.length}`)
   })
 })
 

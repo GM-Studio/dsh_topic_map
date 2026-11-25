@@ -8,7 +8,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -157,6 +157,11 @@ function digestPath(home, sessionId, turn) {
   return join(home, 'topic-map', 'digests', `${sessionId}#${turn}.json`)
 }
 
+async function writeConfig(home, config) {
+  await mkdir(join(home, 'topic-map'), { recursive: true })
+  await writeFile(join(home, 'topic-map', 'config.json'), JSON.stringify(config), 'utf8')
+}
+
 async function waitFor(check, timeoutMs = 2000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -303,7 +308,88 @@ await test('未完成轮不写缓存：每次现算，下次仍重算', async ()
   })
 })
 
-await test('缓存文件形状：{revision,endSeq,summary,model,at}', async () => {
+await test('三档摘要：字数上限 + 确定性命令补丁条数', async () => {
+  const cases = [
+    { level: 'compact', max: 200, line: '' },
+    { level: 'standard', max: 400, line: '命令：c1；c2；c3（共 5 条）' },
+    { level: 'rich', max: 800, line: '命令：c1；c2；c3；c4；c5（共 5 条）' },
+  ]
+  for (const item of cases) {
+    await withTempHome(async home => {
+      const commands = ['c1', 'c2', 'c3', 'c4', 'c5']
+      const ctx = makeCtx({
+        events: {
+          [SESSION]: makeEvents([{ prompt: '问题', response: '回答', commands }]),
+        },
+        llm: makeFakeLlm({ text: '摘'.repeat(1200) }),
+      })
+      await writeConfig(home, { digestLevel: item.level })
+
+      const result = await generateTurnDigest(ctx, { sessionId: SESSION, turn: 0 })
+      assert.equal(result.ok, true, result.error)
+      assert.equal(result.value.level, item.level)
+      assert.ok(result.value.chars <= item.max, `${item.level} 超上限：${result.value.chars}`)
+      assert.equal(result.value.summary.length, result.value.chars)
+      if (item.line === '') {
+        assert.equal(result.value.summary.includes('命令：'), false, `${item.level} 不应加命令行`)
+      } else {
+        assert.ok(result.value.summary.includes(item.line), `${item.level} 缺命令行：${result.value.summary.slice(-120)}`)
+      }
+    })
+  }
+})
+
+await test('命令确定性补丁去重；命令为空不加', async () => {
+  await withTempHome(async home => {
+    const ctx = makeCtx({
+      events: {
+        [SESSION]: makeEvents([{
+          prompt: '问题',
+          response: '回答',
+          commands: ['npm test', 'npm run build'],
+        }]),
+      },
+      llm: makeFakeLlm({ text: '结论：修复完成。\n命令：npm test；npm run build（共 2 条）' }),
+    })
+    await writeConfig(home, { digestLevel: 'standard' })
+    const result = await generateTurnDigest(ctx, { sessionId: SESSION, turn: 0 })
+    assert.equal(result.ok, true, result.error)
+    assert.equal(result.value.summary.split('命令：').length - 1, 1, '命令行不应重复')
+
+    const emptyCtx = makeCtx({
+      events: { [SESSION]: makeEvents([{ prompt: '无命令', response: '回答' }]) },
+      llm: makeFakeLlm({ text: '结论：没有命令。' }),
+    })
+    const empty = await generateTurnDigest(emptyCtx, { sessionId: SESSION, turn: 0 })
+    assert.equal(empty.ok, true, empty.error)
+    assert.equal(empty.value.summary.includes('命令：'), false)
+  })
+})
+
+await test('digestLevel 变化触发重算', async () => {
+  await withTempHome(async home => {
+    const llm = makeFakeLlm()
+    const ctx = makeCtx({
+      events: { [SESSION]: makeEvents([{ prompt: '问题', response: '回答' }]) },
+      llm,
+    })
+    await writeConfig(home, { digestLevel: 'standard' })
+    const first = await generateTurnDigest(ctx, { sessionId: SESSION, turn: 0 })
+    assert.equal(first.value.level, 'standard')
+    assert.equal(first.value.cached, false)
+    const same = await generateTurnDigest(ctx, { sessionId: SESSION, turn: 0 })
+    assert.equal(same.value.cached, true)
+    assert.equal(llm.calls, 1)
+
+    await writeConfig(home, { digestLevel: 'rich' })
+    const rich = await generateTurnDigest(ctx, { sessionId: SESSION, turn: 0 })
+    assert.equal(rich.value.level, 'rich')
+    assert.equal(rich.value.cached, false, 'level 变了必须重算')
+    assert.equal(llm.calls, 2)
+  })
+})
+
+await test('缓存文件形状：{revision,endSeq,level,summary,model,at}', async () => {
   await withTempHome(async home => {
     const events = { [SESSION]: makeEvents([{ prompt: '甲', response: '乙' }]) }
     const ctx = makeCtx({ events })
@@ -316,8 +402,9 @@ await test('缓存文件形状：{revision,endSeq,summary,model,at}', async () =
     assert.equal(raw.endSeq, endSeq)
     assert.equal(raw.summary, result.value.summary)
     assert.equal(raw.model, 'DeepSeek-Flash')
+    assert.equal(raw.level, 'standard')
     assert.ok(Number.isFinite(raw.at) && raw.at > 0)
-    assert.deepEqual(Object.keys(raw).sort(), ['at', 'endSeq', 'model', 'revision', 'summary'])
+    assert.deepEqual(Object.keys(raw).sort(), ['at', 'endSeq', 'level', 'model', 'revision', 'summary'])
   })
 })
 

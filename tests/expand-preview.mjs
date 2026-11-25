@@ -9,7 +9,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -138,7 +138,7 @@ await test('没有句柄：reason 明确，handles/blocks 为空', async () => {
     const ctx = makeCtx({ events: { [CALLER]: makeEvents([{ prompt: '普通消息' }]) } })
     const result = await previewExpansion(ctx, { sessionId: CALLER, text: '这条消息没有引用' })
     assert.equal(result.ok, true)
-    assert.deepEqual(result.value, { handles: [], blocks: [], reason: '没有句柄' })
+    assert.deepEqual(result.value, { handles: [], blocks: [], reason: '没有句柄', alreadyInjected: false })
   })
 })
 
@@ -158,6 +158,8 @@ await test('同会话引用：当前会话不在 workspace registry 也能命中
       handle: '9999aaaa#0',
       matchedSessionId: CALLER,
       turn: 0,
+      alreadyInjected: false,
+      wouldInject: true,
     }])
     assert.equal(result.value.reason, null)
     assert.equal(result.value.blocks.length, 1)
@@ -261,6 +263,61 @@ await test('来源：第二次预览命中缓存', async () => {
     const second = await previewExpansion(ctx, { sessionId: CALLER, text: '〔9999aaaa#0〕' })
     assert.equal(second.value.blocks[0].source, 'cache')
     assert.equal(second.value.blocks[0].chars, first.value.blocks[0].chars)
+  })
+})
+
+await test('已注入过：alreadyInjected 标记、blocks 空、reason 幂等跳过', async () => {
+  await withTempHome(async home => {
+    const ctx = makeCtx({
+      events: { [CALLER]: makeEvents([{ prompt: '问题', response: '回答' }]) },
+      workspaces: [],
+    })
+    const dir = join(home, 'topic-map', 'quote-ledger')
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, `${CALLER}.json`), JSON.stringify({
+      '9999aaaa#0': { at: Date.now(), chars: 12, source: 'cache' },
+    }), 'utf8')
+
+    const result = await previewExpansion(ctx, { sessionId: CALLER, text: '再看 〔9999aaaa#0〕' })
+    assert.equal(result.value.alreadyInjected, true)
+    assert.deepEqual(result.value.handles, [{
+      handle: '9999aaaa#0',
+      matchedSessionId: CALLER,
+      turn: 0,
+      alreadyInjected: true,
+      wouldInject: false,
+    }])
+    assert.deepEqual(result.value.blocks, [])
+    assert.equal(result.value.reason, '已注入过（幂等跳过）')
+  })
+})
+
+await test('进行中轮次：reason 为「该轮仍在进行中」，不注入', async () => {
+  await withTempHome(async () => {
+    const events = makeEvents([{ prompt: '进行中', response: '还没完' }])
+      .filter(event => event.type !== 'turn/end')
+    const ctx = makeCtx({ events: { [CALLER]: events }, workspaces: [] })
+    const result = await previewExpansion(ctx, { sessionId: CALLER, text: '〔9999aaaa#0〕' })
+    assert.equal(result.value.reason, '该轮仍在进行中')
+    assert.deepEqual(result.value.blocks, [])
+  })
+})
+
+await test('归档不可读：reason 为「该会话已归档或不可读」', async () => {
+  await withTempHome(async () => {
+    const ctx = makeCtx({
+      events: {},
+      sessions: [CALLER, TARGET],
+      readSession: async () => {
+        throw new Error('archived')
+      },
+      stat: async () => {
+        throw new Error('archived')
+      },
+    })
+    const result = await previewExpansion(ctx, { sessionId: CALLER, text: '〔4c42ff36#0〕' })
+    assert.equal(result.value.reason, '该会话已归档或不可读')
+    assert.deepEqual(result.value.blocks, [])
   })
 })
 

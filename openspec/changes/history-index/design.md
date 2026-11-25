@@ -73,7 +73,15 @@ schema < 3 的索引一律判过期：消费端先走日志兜底（结果立刻
   响应回传 `workspace/workspaceId` 与 `coverage{sessions,indexed,scannedFromLog,indexing}`。
 - **补齐索引**：检索命中未建索引的会话时逐个入队（并发 2、在途去重、60 秒节流）；
   `POST /workspace-reindex {workspaceId}` 一键排空整工区，**不受节流**，立即返回 `queued`。
-- **会话代码块**：`POST /session-commands {sessionId, offset?, limit?, q?, lang?}` → `{total,offset,limit,hasMore,commands[{seq,turn,lang,text}]}`。
+- **规模化检索（L2，后期排期）**：本机实测（`node:sqlite` + FTS5 `trigram`，无需原生模块）——
+  2 万轮：插入 60ms、查询 0–1ms；**20 万轮**：插入 **2007ms**、3 字查询 **5ms**、4 字 **15ms**、
+  DB **108.4MB**（单行 292 字节 ⇒ 每轮 0.56KB，约为正文的 1.9 倍）；
+  **两字词是硬限制**：`trigram` 至少 3 字符，`左栏` 这类查询 MATCH 返回 0，需回退
+  `LIKE '%左栏%'`（20 万轮全表 **55ms**）。
+  因此路由：≥3 字走 FTS；1–2 字先在 L0 按时间/会话剪枝，再在候选集线性扫或 LIKE。
+  **触发条件**：单工区轮次 > 2 万（低于此，现有内存扫描 20–60ms 更快更简单）。
+  风险：`node:sqlite` 在 Node 24 仍标 experimental——必须包一层 `searchBackend`，
+  默认走 JSONL 扫描，超阈值才切 SQLite，最坏退回慢路径而不是崩。
   解析器在 **`lib/code-blocks.js`**（`codeBlocksOf(response)`），**`/search` 的命中计数也用它**——
   同一轮 response 的代码块数即 `hit.blockCount`（`commandCount` 保留为同值别名），分组计数为组内合计。
   两边共用一套解析，避免"徽标数字与浮窗内容对不上"。

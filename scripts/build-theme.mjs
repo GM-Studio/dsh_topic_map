@@ -48,6 +48,8 @@ const GMODE_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/gra
 const GMODE_END = '    // ══ 图着色模式生成段结束 ══'
 const REPORT_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/report.js'
 const REPORT_END = '    // ══ 报告生成段结束 ══'
+const HITVIEW_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/hit-view.js'
+const HITVIEW_END = '    // ══ hit-view 生成段结束 ══'
 
 const themeSrc = strip(readFileSync(join(root, 'lib', 'theme.js'), 'utf8'))
 const themeWrapped = [
@@ -200,6 +202,23 @@ const scatWrapped = [
   SCAT_END,
 ].join('\n')
 
+const hitSrc = strip(readFileSync(join(root, 'lib', 'hit-view.js'), 'utf8'))
+const hitWrapped = [
+  HITVIEW_START,
+  '    // 列表视图模型（右栏两行 / 主面板三行 / 分数来源），纯函数，',
+  '    // 独立测试过（tests/hit-view.mjs）。导出清单手写：客户端用了哪个',
+  '    // 名字就必须在这里导出一个，否则运行时 TypeError + 白屏。',
+  '    var HITVIEW = (function () {',
+  indent(hitSrc),
+  '      return {',
+  '        formatRelativeTime: formatRelativeTime, toRow: toRow, toTwoLine: toTwoLine,',
+  '        toThreeLine: toThreeLine, scoreParts: scoreParts, groupHeader: groupHeader,',
+  '        copySummary: copySummary,',
+  '      }',
+  '    })()',
+  HITVIEW_END,
+].join('\n')
+
 const clientPath = join(root, 'lib', 'client.js')
 let client = readFileSync(clientPath, 'utf8')
 
@@ -235,6 +254,7 @@ console.log('deliverables:', splice(DELIV_START, DELIV_END, delivWrapped, FOLD_E
 console.log('report:', splice(REPORT_START, REPORT_END, reportWrapped, DELIV_END))
 console.log('graph-mode:', splice(GMODE_START, GMODE_END, gmWrapped, REPORT_END))
 console.log('session-category:', splice(SCAT_START, SCAT_END, scatWrapped, GMODE_END))
+console.log('hit-view:', splice(HITVIEW_START, HITVIEW_END, hitWrapped, SCAT_END))
 
 writeFileSync(clientPath, client)
 console.log('已写入 lib/client.js')

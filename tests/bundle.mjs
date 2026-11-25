@@ -46,8 +46,8 @@ function usedNames(prefix) {
 
 console.log('\nbundle')
 
-// ── 四个嵌入模块 ────────────────────────────────────────────────────
-for (const name of ['THEME', 'FILTER', 'PM', 'UISTATE', 'FOLD', 'DELIV', 'REPORT', 'GMODE', 'SCAT']) {
+// ── 嵌入模块 ────────────────────────────────────────────────────────
+for (const name of ['THEME', 'FILTER', 'PM', 'UISTATE', 'FOLD', 'DELIV', 'REPORT', 'GMODE', 'SCAT', 'HITVIEW']) {
   test(`${name} 的导出覆盖客户端的全部使用`, () => {
     const block = moduleBlock(name)
     assert.ok(block !== null, `bundle 里找不到 ${name}，生成段缺失`)

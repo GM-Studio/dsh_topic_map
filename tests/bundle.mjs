@@ -47,7 +47,7 @@ function usedNames(prefix) {
 console.log('\nbundle')
 
 // ── 嵌入模块 ────────────────────────────────────────────────────────
-for (const name of ['THEME', 'FILTER', 'PM', 'UISTATE', 'FOLD', 'DELIV', 'REPORT', 'GMODE', 'SCAT', 'HITVIEW', 'CITE']) {
+for (const name of ['THEME', 'FILTER', 'PM', 'UISTATE', 'FOLD', 'DELIV', 'REPORT', 'GMODE', 'SCAT', 'HITVIEW', 'CITE', 'RAILVIEW', 'STATSFMT', 'SETTINGVIEW']) {
   test(`${name} 的导出覆盖客户端的全部使用`, () => {
     const block = moduleBlock(name)
     assert.ok(block !== null, `bundle 里找不到 ${name}，生成段缺失`)
@@ -60,13 +60,23 @@ for (const name of ['THEME', 'FILTER', 'PM', 'UISTATE', 'FOLD', 'DELIV', 'REPORT
 }
 
 // ── 生成段完整存在 ──────────────────────────────────────────────────
-test('四个生成段都在 bundle 里', () => {
+test('所有生成段都在 bundle 里', () => {
   for (const marker of [
     '从 lib/viewport.js',
     '从 lib/theme.js',
     '从 lib/filter.js',
     '从 lib/pm-model.js',
     '从 lib/ui-state.js',
+    '从 lib/tree-fold.js',
+    '从 lib/deliverables.js',
+    '从 lib/report.js',
+    '从 lib/graph-mode.js',
+    '从 lib/session-category.js',
+    '从 lib/hit-view.js',
+    '从 lib/cite.js',
+    '从 lib/rail-view.js',
+    '从 lib/stats-format.js',
+    '从 lib/settings-view.js',
   ]) {
     assert.ok(src.includes(marker), `缺少生成段：${marker}`)
   }
@@ -146,32 +156,36 @@ test('CITE 嵌入后能真实执行（引用块与预算）', () => {
   })
 })
 
-// ── V-12：rail-view 嵌入段 ───────────────────────────────────────────
+// ── V-12 起：三个模块由 build-theme 正式嵌入 ─────────────────────────
 //
-// rail-view 没有接进 scripts/build-theme.mjs（那是另一个 agent 的文件），
-// 所以这一段是手工嵌入的。手工嵌入最大的风险是「改了 lib 忘了同步」，
-// 于是这里做**逐字节**校验：嵌入段必须等于 lib/rail-view.js 按同一规则
-// 去掉模块声明与 export 关键字后的原文。
+// 手工同步是白屏的温床（改了 lib 忘了改 client）。现在 rail-view /
+// stats-format / settings-view 都走 scripts/build-theme.mjs，这里仍然做
+// **逐字节**校验：嵌入段必须等于源文件按同一规则去掉模块声明后的原文。
 
-test('RAILVIEW 嵌入段存在（V-12 历史轨）', () => {
-  assert.ok(moduleBlock('RAILVIEW') !== null, 'client.js 里找不到 RAILVIEW 嵌入段')
-  assert.ok(src.includes('lib/rail-view.js 原样嵌入'), '缺少嵌入段说明注释')
-})
-
-test('RAILVIEW 嵌入段与 lib/rail-view.js 逐字节一致', () => {
-  const source = readFileSync(join(root, 'lib', 'rail-view.js'), 'utf8')
+/** 与 scripts/build-theme.mjs 的 strip + indent 完全同规则。 */
+function builtBody(file) {
+  const source = readFileSync(join(root, 'lib', file), 'utf8')
   const stripped = source
     .replace(/^\/\*\*[\s\S]*?\*\/\s*/m, '')
     .replace(/^export const /gm, 'var ')
     .replace(/^export function /gm, 'function ')
     .replace(/^import .*$/gm, '')
     .replace(/\s+$/, '')
-  const indented = stripped.split('\n').map(line => (line === '' ? '' : '  ' + line)).join('\n')
-  const block = moduleBlock('RAILVIEW')
-  assert.ok(block !== null)
-  assert.ok(block.includes(indented),
-    '嵌入段与源码不一致：改 lib/rail-view.js 后必须同步 client.js 的 RAILVIEW 段')
-})
+  return stripped.split('\n').map(line => (line === '' ? '' : '  ' + line)).join('\n')
+}
+
+for (const [name, file] of [
+  ['RAILVIEW', 'rail-view.js'],
+  ['STATSFMT', 'stats-format.js'],
+  ['SETTINGVIEW', 'settings-view.js'],
+]) {
+  test(`${name} 嵌入段与 lib/${file} 逐字节一致`, () => {
+    const block = moduleBlock(name)
+    assert.ok(block !== null, `client.js 里找不到 ${name} 嵌入段`)
+    assert.ok(block.includes(builtBody(file)),
+      `嵌入段与源码不一致：改 lib/${file} 后必须运行 node scripts/build-theme.mjs`)
+  })
+}
 
 test('RAILVIEW 嵌入后能真实执行，且导出覆盖接管层的全部 view.* 调用', () => {
   const RAILVIEW = evalEmbedded('RAILVIEW')
@@ -197,6 +211,39 @@ test('RAILVIEW 嵌入后能真实执行，且导出覆盖接管层的全部 view
   for (const name of used) {
     assert.ok(name in RAILVIEW, `接管层用到 view.${name}，但 RAILVIEW 没有导出`)
   }
+})
+
+test('STATSFMT 嵌入后能真实执行（头条 / 行 / 用量拆分）', () => {
+  const STATSFMT = evalEmbedded('STATSFMT')
+  const headline = STATSFMT.statsHeadline({
+    totals: {
+      sessions: 3, turns: 12, activeDays: 2,
+      tokens: { input: 1500, output: 500, total: 2000 },
+    },
+  })
+  assert.equal(headline.length, 4)
+  assert.equal(headline[0].value, '3')
+  assert.equal(headline[3].value, '2k tokens')
+  const rows = STATSFMT.statsRows(
+    [{ title: 'A', turns: 4 }, { title: 'B', turns: 2 }],
+    { now: 1_700_000_060_000 },
+  )
+  assert.deepEqual(rows.map(row => row.barPercent), [100, 50])
+  assert.equal(STATSFMT.usageSplit({ input: 30, output: 10 }).ratio, 0.25)
+})
+
+test('SETTINGVIEW 嵌入后能真实执行（模型 / 校验 / 差异）', () => {
+  const SETTINGVIEW = evalEmbedded('SETTINGVIEW')
+  const model = SETTINGVIEW.settingsModel({ turnLimit: 80, digestLevel: 'rich' })
+  const turnLimit = model.groups.flatMap(group => group.items).find(item => item.key === 'turnLimit')
+  assert.equal(turnLimit.value, 80)
+  const applied = SETTINGVIEW.applySetting({ turnLimit: 80 }, 'turnLimit', 120)
+  assert.equal(applied.config.turnLimit, 120)
+  assert.ok(SETTINGVIEW.applySetting({}, 'turnLimit', 1).error.includes('5–500'))
+  assert.deepEqual(
+    SETTINGVIEW.diffConfig({ a: 1, b: 2 }, { a: 1, b: 3, c: 4 }),
+    { b: 3, c: 4 },
+  )
 })
 
 test('接管层已接进 apply（不是写完忘了挂）', () => {

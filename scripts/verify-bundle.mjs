@@ -45,7 +45,10 @@ function usedNames(prefix) {
   return [...new Set([...src.matchAll(re)].map(m => m[1]))]
 }
 
-const MODULES = ['THEME', 'FILTER', 'PM', 'UISTATE', 'FOLD', 'DELIV', 'REPORT', 'GMODE', 'SCAT', 'HITVIEW', 'CITE']
+const MODULES = [
+  'THEME', 'FILTER', 'PM', 'UISTATE', 'FOLD', 'DELIV', 'REPORT', 'GMODE', 'SCAT',
+  'HITVIEW', 'CITE', 'RAILVIEW', 'STATSFMT', 'SETTINGVIEW',
+]
 let failed = false
 
 for (const name of MODULES) {

@@ -108,6 +108,12 @@ class FakeElement {
     if (at >= 0) list.splice(at, 1)
   }
 
+  setPointerCapture(pointerId) { this.capturedPointer = pointerId }
+  releasePointerCapture(pointerId) {
+    this.releasedPointer = pointerId
+    if (this.capturedPointer === pointerId) this.capturedPointer = null
+  }
+
   /** 冒泡派发：真实 DOM 里 click 会冒泡到 rows 容器上的委托监听。 */
   dispatchEvent(event) {
     let node = this
@@ -116,11 +122,12 @@ class FakeElement {
       if (list !== undefined) {
         for (const listener of list) {
           listener({
+            ...event,
             type: event.type,
             target: this,
             currentTarget: node,
-            clientX: event.clientX,
-            preventDefault: function () {},
+            preventDefault: event.preventDefault || function () {},
+            stopPropagation: event.stopPropagation || function () {},
           })
         }
       }
@@ -254,17 +261,42 @@ class FakeDocument {
 
   dispatch(type, event) {
     const list = this.listeners.get(type) || []
-    for (const listener of list) listener({ type, preventDefault: function () {}, clientX: event === undefined ? 0 : event.clientX })
+    for (const listener of list) {
+      listener({
+        ...event,
+        type,
+        preventDefault: (event && event.preventDefault) || function () {},
+        stopPropagation: (event && event.stopPropagation) || function () {},
+        clientX: event === undefined ? 0 : event.clientX,
+      })
+    }
   }
 }
 
 /** 假 window：定时器队列 + getComputedStyle + 存储。 */
 function makeWindow(store) {
   const timers = []
+  let nextId = 1
   return {
     timers,
-    setTimeout(fn) { timers.push(fn); return timers.length },
-    clearTimeout() {},
+    setTimeout(fn, delay) {
+      const timer = { id: nextId, delay: delay === undefined ? 0 : delay, fn, cancelled: false }
+      nextId += 1
+      timers.push(timer)
+      return timer.id
+    },
+    clearTimeout(id) {
+      for (const timer of timers) {
+        if (timer.id === id) timer.cancelled = true
+      }
+    },
+    /** 运行所有未取消的定时器（测试用；真实浏览器等 1500ms 即可）。 */
+    runTimers() {
+      const due = timers.splice(0)
+      for (const timer of due) {
+        if (!timer.cancelled) timer.fn()
+      }
+    },
     getComputedStyle() { return { right: '12px', top: '300px', maxHeight: '420px' } },
     addEventListener() {},
     removeEventListener() {},
@@ -611,6 +643,195 @@ await test('拖拽释放：吸附到 40/200/320 并写回本会话的键', async
   assert.equal(store.getItem('dsh.tm.rail.width.s1'), '320', '拖到最宽吸附 320 并记住')
   assert.equal(railOf(scene.doc).getAttribute('data-tier'), 'wide')
   assert.equal(RAILTAKE.widthOf(), 320)
+  dispose()
+})
+
+// ── 6b. 抓手：常显竖线 + pointer capture + 实时宽度 + 吸附 ───────────
+await test('抓手：8px 命中区常显竖线，pointer capture 后拖拽实时改宽并吸附', async () => {
+  const scene = buildScene()
+  const { dispose, store } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+
+  const rail = railOf(scene.doc)
+  const grip = rail.querySelector('.dsh_tm_railgrip')
+  assert.ok(grip !== null, '必须渲染抓手')
+  assert.ok(grip.querySelector('.dsh_tm_railgripbar') !== null, '抓手必须常显一条竖线（不是只靠 hover 背景）')
+  assert.ok(String(grip.title).includes('40 / 200 / 320'), '抓手 title 要写明三档，拖拽才可发现')
+
+  grip.dispatchEvent({ type: 'pointerdown', clientX: 400, pointerId: 7 })
+  assert.equal(grip.capturedPointer, 7, 'pointerdown 必须 setPointerCapture')
+  assert.equal(scene.doc.body.style.cursor, 'col-resize', '拖拽时文档光标要变成 col-resize')
+  assert.equal(scene.doc.body.style.userSelect, 'none', '拖拽时禁止选中')
+  assert.equal(rail.getAttribute('data-dragging'), '1')
+
+  scene.doc.dispatch('pointermove', { clientX: -100, pointerId: 7 })
+  assert.equal(rail.style.width, '320px', '实时宽度必须夹在 40–320 的内边界')
+  scene.doc.dispatch('pointermove', { clientX: 500, pointerId: 7 })
+  assert.equal(rail.style.width, '100px', '拖拽中实时跟手，不在 move 阶段吸附')
+  assert.equal(store.getItem('dsh.tm.rail.width.s1'), null, '松开前不写宽度')
+
+  scene.doc.dispatch('pointerup', { pointerId: 7 })
+  assert.equal(store.getItem('dsh.tm.rail.width.s1'), '40', '松开后 100px 吸附到最近的 40 档并写回')
+  assert.equal(rail.style.width, '40px')
+  assert.equal(rail.getAttribute('data-tier'), 'hair')
+  assert.equal(scene.doc.body.style.cursor, '', '松开后恢复光标')
+  assert.equal(scene.doc.body.style.userSelect, '', '松开后恢复选中')
+  assert.equal(grip.releasedPointer, 7, 'pointerup 要 releasePointerCapture')
+  assert.equal(rail.getAttribute('data-dragging'), null)
+  dispose()
+})
+
+// ── 6c. 折叠 / 自动隐藏 / 快捷键 ────────────────────────────────────
+await test('折叠条：点击收成 16px 竖条，再点展开；按会话记忆', async () => {
+  const scene = buildScene()
+  const { dispose, store } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+
+  const rail = railOf(scene.doc)
+  const collapse = rail.querySelector('.dsh_tm_railcollapse')
+  assert.ok(collapse !== null, '必须有折叠条')
+  assert.equal(rail.style.width, '200px', '默认宽度 200')
+
+  collapse.dispatchEvent({ type: 'click' })
+  assert.equal(rail.getAttribute('data-collapsed'), '1')
+  assert.equal(rail.style.width, '16px', '折叠后收成 16px 竖条')
+  assert.equal(store.getItem('dsh.tm.rail.collapsed.s1'), '1', '折叠状态按会话记忆')
+  assert.equal(rail.getAttribute('data-tier'), 'normal', '三档宽度语义不变')
+
+  collapse.dispatchEvent({ type: 'click' })
+  assert.equal(rail.getAttribute('data-collapsed'), '0')
+  assert.equal(rail.style.width, '200px')
+  assert.equal(store.getItem('dsh.tm.rail.collapsed.s1'), '0')
+  dispose()
+})
+
+await test('折叠状态跨启动还原（同一会话的 localStorage 键）', async () => {
+  const scene = buildScene()
+  const store = makeStore({ 'dsh.tm.rail.collapsed.s1': '1' })
+  const { dispose } = makeTakeover(scene.doc, { store, loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  assert.equal(railOf(scene.doc).getAttribute('data-collapsed'), '1')
+  assert.equal(railOf(scene.doc).style.width, '16px')
+  dispose()
+})
+
+await test('Alt+[ 切换折叠/展开', async () => {
+  const scene = buildScene()
+  const { dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  const rail = railOf(scene.doc)
+  scene.doc.dispatch('keydown', { altKey: true, code: 'BracketLeft', key: '[' })
+  assert.equal(rail.getAttribute('data-collapsed'), '1', 'Alt+[ 应收起')
+  scene.doc.dispatch('keydown', { altKey: true, code: 'BracketLeft', key: '[' })
+  assert.equal(rail.getAttribute('data-collapsed'), '0', '再按一次展开')
+  dispose()
+})
+
+await test('自动隐藏：离开 1.5 秒收成半透明细条，移入立即恢复；默认开', async () => {
+  const scene = buildScene()
+  const { RAILTAKE, dispose, win, store } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  const rail = railOf(scene.doc)
+  assert.equal(RAILTAKE.autoHideEnabled(), true, '默认开启自动隐藏')
+
+  rail.dispatchEvent({ type: 'pointerleave' })
+  assert.equal(win.timers.some(timer => timer.delay === 1500), true, '离开后应挂 1.5s 定时器')
+  assert.equal(rail.getAttribute('data-autohide'), '0', '计时未到不立即收起')
+  win.runTimers()
+  assert.equal(rail.getAttribute('data-autohide'), '1')
+  assert.equal(rail.style.width, '16px', '自动隐藏也收成 16px')
+  assert.equal(store.getItem('dsh.tm.rail.autohide'), null, '自动隐藏不写折叠键')
+
+  rail.dispatchEvent({ type: 'pointerenter' })
+  assert.equal(rail.getAttribute('data-autohide'), '0', '移入立即恢复')
+  assert.equal(rail.style.width, '200px')
+  dispose()
+})
+
+await test('自动隐藏计时在移入时取消；设置关掉后不再收起', async () => {
+  const scene = buildScene()
+  const { RAILTAKE, dispose, win, store } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  const rail = railOf(scene.doc)
+
+  rail.dispatchEvent({ type: 'pointerleave' })
+  rail.dispatchEvent({ type: 'pointerenter' })
+  win.runTimers()
+  assert.equal(rail.getAttribute('data-autohide'), '0', '移入后旧的隐藏计时器必须取消')
+
+  RAILTAKE.setAutoHide(false)
+  assert.equal(store.getItem('dsh.tm.rail.autohide'), '0', '设置关掉要写共享键')
+  rail.dispatchEvent({ type: 'pointerleave' })
+  win.runTimers()
+  assert.equal(rail.getAttribute('data-autohide'), '0', '关掉后离开不收起')
+  assert.equal(rail.style.width, '200px')
+  dispose()
+})
+
+// ── 6d. 偏好同步 / rail 自己 ⋯ 菜单 ────────────────────────────────
+await test('偏好同步：setter 写同一份 localStorage，其它实例/订阅者立即可见', async () => {
+  const scene = buildScene()
+  const { RAILTAKE, dispose, store } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  let notified = 0
+  const unsubscribe = RAILTAKE.subscribe(() => { notified += 1 })
+
+  RAILTAKE.setNativePreferred(false)
+  RAILTAKE.setAutoHide(false)
+  RAILTAKE.setWidth(40)
+  assert.ok(notified >= 3, '每个 setter 都应通知订阅者（设置页据此重渲染）')
+  assert.equal(store.getItem('dsh.tm.rail.native'), '0')
+  assert.equal(store.getItem('dsh.tm.rail.autohide'), '0')
+  assert.equal(store.getItem('dsh.tm.rail.width.s1'), '40')
+  assert.equal(RAILTAKE.widthOf(), 40)
+
+  // 第二个实例模拟另一处设置面：读同一份 store，必须看到刚写的值。
+  const scene2 = buildScene()
+  const second = makeTakeover(scene2.doc, { store, loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  assert.equal(second.RAILTAKE.nativePreferred(), false)
+  assert.equal(second.RAILTAKE.autoHideEnabled(), false)
+  assert.equal(second.RAILTAKE.widthOf(), 40)
+  assert.equal(railOf(scene2.doc).style.width, '40px')
+  second.dispose()
+  unsubscribe()
+  dispose()
+})
+
+await test('rail ⋯ 菜单：恢复原生 / 自动隐藏 / 收窄 / 加宽都走同一套 setter', async () => {
+  const scene = buildScene()
+  const { RAILTAKE, dispose, store } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  const rail = railOf(scene.doc)
+  const more = rail.querySelector('.dsh_tm_railmore')
+  assert.ok(more !== null)
+  assert.equal(RAILTAKE.autoHideEnabled(), true)
+
+  more.dispatchEvent({ type: 'click' })
+  let menu = rail.querySelector('.dsh_tm_railmenu')
+  assert.ok(menu !== null, '⋯ 应打开菜单')
+  let items = menu.querySelectorAll('.dsh_tm_railmenuitem')
+  const labelOf = node => node.querySelector('.dsh_tm_railmenutext').textContent
+  assert.deepEqual(items.map(labelOf), ['恢复原生导航轨', '自动隐藏', '收窄', '加宽'])
+
+  items.find(item => labelOf(item) === '自动隐藏').dispatchEvent({ type: 'click' })
+  assert.equal(store.getItem('dsh.tm.rail.autohide'), '0', '菜单开关写共享键')
+  assert.equal(rail.querySelector('.dsh_tm_railmenu'), null, '点完关闭菜单')
+
+  more.dispatchEvent({ type: 'click' })
+  items = rail.querySelector('.dsh_tm_railmenu').querySelectorAll('.dsh_tm_railmenuitem')
+  items.find(item => labelOf(item) === '收窄').dispatchEvent({ type: 'click' })
+  assert.equal(store.getItem('dsh.tm.rail.width.s1'), '40', '收窄到 hair 40')
+  assert.equal(rail.getAttribute('data-tier'), 'hair')
+
+  more.dispatchEvent({ type: 'click' })
+  items = rail.querySelector('.dsh_tm_railmenu').querySelectorAll('.dsh_tm_railmenuitem')
+  items.find(item => labelOf(item) === '加宽').dispatchEvent({ type: 'click' })
+  assert.equal(store.getItem('dsh.tm.rail.width.s1'), '200', '加宽回 normal 200')
+  more.dispatchEvent({ type: 'click' })
+  items = rail.querySelector('.dsh_tm_railmenu').querySelectorAll('.dsh_tm_railmenuitem')
+  items.find(item => labelOf(item) === '加宽').dispatchEvent({ type: 'click' })
+  assert.equal(store.getItem('dsh.tm.rail.width.s1'), '320', '再加宽到 wide 320')
   dispose()
 })
 

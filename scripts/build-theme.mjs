@@ -52,6 +52,12 @@ const HITVIEW_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/h
 const HITVIEW_END = '    // ══ hit-view 生成段结束 ══'
 const CITE_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/cite.js'
 const CITE_END = '    // ══ cite 生成段结束 ══'
+const RAILVIEW_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/rail-view.js'
+const RAILVIEW_END = '    // ══ rail-view 生成段结束 ══'
+const STATSFMT_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/stats-format.js'
+const STATSFMT_END = '    // ══ stats-format 生成段结束 ══'
+const SETTINGVIEW_START = '    // ══ 以下由 scripts/build-theme.mjs 从 lib/settings-view.js'
+const SETTINGVIEW_END = '    // ══ settings-view 生成段结束 ══'
 
 const themeSrc = strip(readFileSync(join(root, 'lib', 'theme.js'), 'utf8'))
 const themeWrapped = [
@@ -236,6 +242,52 @@ const citeWrapped = [
   CITE_END,
 ].join('\n')
 
+const railviewSrc = strip(readFileSync(join(root, 'lib', 'rail-view.js'), 'utf8'))
+const railviewWrapped = [
+  RAILVIEW_START,
+  '    // 历史轨视图模型（V-12），纯函数，独立测试过（tests/rail-view.mjs）。',
+  '    // V-12 起改由本脚本嵌入：手工同步段已删除，改源码后重新生成即可。',
+  '    var RAILVIEW = (function () {',
+  indent(railviewSrc),
+  '      return {',
+  '        TIER_WIDTHS: TIER_WIDTHS, tierOf: tierOf, snapWidth: snapWidth,',
+  '        turnOfLabel: turnOfLabel, rowsOf: rowsOf, activeIndexOf: activeIndexOf,',
+  '        anchorFor: anchorFor, selfCheck: selfCheck,',
+  '      }',
+  '    })()',
+  RAILVIEW_END,
+].join('\n')
+
+const statsfmtSrc = strip(readFileSync(join(root, 'lib', 'stats-format.js'), 'utf8'))
+const statsWrapped = [
+  STATSFMT_START,
+  '    // 统计页格式化（页头四卡 / 会话行 / 用量拆分），纯函数，',
+  '    // 独立测试过（tests/stats-format.mjs）。',
+  '    var STATSFMT = (function () {',
+  indent(statsfmtSrc),
+  '      return {',
+  '        formatRelative: formatRelative, statsHeadline: statsHeadline,',
+  '        statsRows: statsRows, usageSplit: usageSplit,',
+  '      }',
+  '    })()',
+  STATSFMT_END,
+].join('\n')
+
+const settingSrc = strip(readFileSync(join(root, 'lib', 'settings-view.js'), 'utf8'))
+const settingWrapped = [
+  SETTINGVIEW_START,
+  '    // 设置表单模型（分组 / 单字段校验 / 只提交差异），纯函数，',
+  '    // 独立测试过（tests/settings-view.mjs）。',
+  '    var SETTINGVIEW = (function () {',
+  indent(settingSrc),
+  '      return {',
+  '        settingsModel: settingsModel, applySetting: applySetting,',
+  '        diffConfig: diffConfig,',
+  '      }',
+  '    })()',
+  SETTINGVIEW_END,
+].join('\n')
+
 const clientPath = join(root, 'lib', 'client.js')
 let client = readFileSync(clientPath, 'utf8')
 
@@ -273,6 +325,9 @@ console.log('graph-mode:', splice(GMODE_START, GMODE_END, gmWrapped, REPORT_END)
 console.log('session-category:', splice(SCAT_START, SCAT_END, scatWrapped, GMODE_END))
 console.log('hit-view:', splice(HITVIEW_START, HITVIEW_END, hitWrapped, SCAT_END))
 console.log('cite:', splice(CITE_START, CITE_END, citeWrapped, HITVIEW_END))
+console.log('rail-view:', splice(RAILVIEW_START, RAILVIEW_END, railviewWrapped, CITE_END))
+console.log('stats-format:', splice(STATSFMT_START, STATSFMT_END, statsWrapped, RAILVIEW_END))
+console.log('settings-view:', splice(SETTINGVIEW_START, SETTINGVIEW_END, settingWrapped, STATSFMT_END))
 
 writeFileSync(clientPath, client)
 console.log('已写入 lib/client.js')

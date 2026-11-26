@@ -38,9 +38,9 @@ await test('闪烁守卫：plan.idle + 旧分类结果 → 立即引导，不画
   assert.equal(idleGuide({ status: 'idle' }, IDLE_PLAN, false), true)
 })
 
-await test('默认最近轮次 / 分类浏览不被 idle 守卫误伤', () => {
-  assert.equal(idleGuide({ status: 'ready', recent: true, hits: [] }, IDLE_PLAN, false), false)
-  assert.equal(idleGuide({ status: 'idle' }, { idle: false }, true), false, '分类浏览有自己的列表')
+await test('分类浏览（含「全部」）不被 idle 守卫误伤', () => {
+  assert.equal(idleGuide({ status: 'idle' }, { idle: true }, true), false, '全部/分类浏览有自己的会话列表')
+  assert.equal(idleGuide(OLD_READY, IDLE_PLAN, false), true)
 })
 
 await test('分页页数：0 条也至少 1 页，137/10 = 14 页', () => {
@@ -67,13 +67,14 @@ await test('pageSize 按工作区记忆：只接受 10/15/20，坏值回 10', ()
   assert.equal(save('ws-2', 99), 10, '非法值回落默认')
 })
 
-await test('请求：列表模式带 offset/limit；默认视图带 sessionIds + sort=time', () => {
+await test('请求：关键词检索带 offset/limit；无关键词与分类浏览不发 /search', () => {
   assert.ok(src.includes('offset: page * pageSize'))
   assert.ok(src.includes('limit: pageSize'))
-  assert.ok(src.includes("body.sort = 'time'"))
-  assert.ok(src.includes('body.sessionIds = boundSessionId'))
-  assert.ok(src.includes("startHistorySearch(plan, { recent: true, clear: true })"))
-  assert.ok(src.includes("当前会话最近轮次"))
+  assert.equal(src.includes('body.sessionIds = boundSessionId'), false)
+  assert.equal(src.includes("body.sort = 'time'"), false)
+  assert.equal(src.includes("startHistorySearch(plan, { recent: true, clear: true })"), false)
+  assert.equal(src.includes('当前会话最近轮次'), false)
+  assert.ok(src.includes("if (plan.keywords === '')"))
 })
 
 await test('分支顺序：idle → error → 分类会话列表 → 时间线 → 检索行', () => {

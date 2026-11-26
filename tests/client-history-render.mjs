@@ -45,10 +45,19 @@ function loadModule() {
 }
 
 const CATEGORY_STORE = {
-  categories: [{ id: 'c-reader', name: '阅读器', parentId: null }],
-  assignments: { s1: { categoryId: 'c-reader', source: 'user' } },
+  categories: [
+    { id: 'c-reader', name: '阅读器', parentId: null },
+    { id: 'c-child', name: '子类', parentId: 'c-reader' },
+    { id: 'c-grand', name: '孙类', parentId: 'c-child' },
+  ],
+  assignments: { s1: { categoryId: 'c-grand', source: 'user' } },
 }
-const SESSIONS = [{ sessionId: 's1', title: '会话 A', turns: 25, lastActive: 1700000000000 }]
+const SESSIONS = Array.from({ length: 25 }, (_, i) => ({
+  sessionId: 's' + (i + 1),
+  title: '会话 ' + (i + 1),
+  turns: 25 - i,
+  lastActive: 1700000000000 - i * 1000,
+}))
 
 function hit(turn) {
   return {
@@ -132,27 +141,41 @@ function searchCalls(scene) {
   return scene.fake.calls.filter(call => call.action === 'search')
 }
 
-await test('默认视图 = 当前会话最近轮次（空关键词 + sessionIds + sort=time）', async () => {
+await test('初始「全部」：所有会话列表，不出现最近轮次，也不请求 /search', async () => {
   const scene = await mountHistory()
-  const head = byClass(scene.runtime.tree, 'dsh_tm_histrecenthead')
-  assert.equal(textOf(head[0]), '当前会话最近轮次')
-  const rows = byClass(scene.runtime.tree, 'dsh_tm_histrow')
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrecenthead').length, 0)
+  assert.equal(textOf(scene.runtime.tree).includes('当前会话最近轮次'), false)
+  const rows = byClass(scene.runtime.tree, 'dsh_tm_histcatsession')
   assert.equal(rows.length, 10, '默认每页 10 条')
-  const request = searchCalls(scene)[0]
-  assert.deepEqual(request.body.sessionIds, ['s1'])
-  assert.equal(request.body.sort, 'time')
-  assert.equal(request.body.keywords, '')
+  assert.ok(textOf(scene.runtime.tree).includes('共 25 个会话'))
+  assert.equal(searchCalls(scene).length, 0, '全部模式不该请求 /search')
   const diag = scene.diag()
-  assert.equal(diag.branch, 'default-recent')
+  assert.equal(diag.branch, 'category-browse')
   assert.equal(diag.plan.idle, true)
-  assert.equal(diag.result.hits, 10)
-  assert.equal(diag.result.total, 25)
+  assert.equal(diag.browse.total, 25)
+  scene.runtime.unmount()
+})
+
+await test('顶级胶囊包含孙类会话；「全部」恢复所有会话', async () => {
+  const scene = await mountHistory()
+  const pill = byClass(scene.runtime.tree, 'dsh_tm_histcatpill')
+    .find(node => node.props['data-cat-id'] === 'c-reader')
+  click(pill)
+  await scene.runtime.settle()
+  const one = byClass(scene.runtime.tree, 'dsh_tm_histcatsession')
+  assert.equal(one.length, 1, '挂在孙类 c-grand 的会话要算到顶级 c-reader')
+  assert.ok(textOf(one[0]).includes('会话 1'))
+  const all = byClass(scene.runtime.tree, 'dsh_tm_histcatpill')
+    .find(node => node.props['data-cat-id'] === '__all__')
+  click(all)
+  await scene.runtime.settle()
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length, 10)
+  assert.equal(scene.diag().browse.total, 25)
   scene.runtime.unmount()
 })
 
 await test('闪烁：分类结果 → 点全部，在 effect 前 renderOnce 已无旧行', async () => {
   const scene = await mountHistory()
-  // 先得到分类结果；再把输入改成纯前缀但不跑 effect，模拟“点全部”前的旧结果。
   const searchInput = byClass(scene.runtime.tree, 'dsh_tm_history_search')[0]
   change(searchInput, '分类:阅读器 索引')
   searchInput.props.onKeyDown({ key: 'Enter', preventDefault() {} })
@@ -166,14 +189,13 @@ await test('闪烁：分类结果 → 点全部，在 effect 前 renderOnce 已�
   const all = byClass(scene.runtime.tree, 'dsh_tm_histcatpill')
     .find(node => node.props['data-cat-id'] === '__all__')
   click(all)
-  // 关键：不 settle、不跑 effect，手动 commit 这一帧。
   scene.runtime.renderOnce()
-  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrow').length, 0, '不能画一帧旧分类行')
-  assert.ok(textOf(scene.runtime.tree).includes('输入关键词检索，或从左侧选择分类'))
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrow').length, 0, '不能画一帧旧检索行')
+  assert.ok(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length > 0, '直接进入全部会话列表')
   scene.runtime.unmount()
 })
 
-await test('清空输入：effect 前这一帧也不画旧结果', async () => {
+await test('清空输入：effect 前这一帧直接回全部会话', async () => {
   const scene = await mountHistory()
   const input = byClass(scene.runtime.tree, 'dsh_tm_history_search')[0]
   change(input, '索引')
@@ -185,11 +207,11 @@ await test('清空输入：effect 前这一帧也不画旧结果', async () => {
   change(byClass(scene.runtime.tree, 'dsh_tm_history_search')[0], '')
   scene.runtime.renderOnce()
   assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrow').length, 0)
-  assert.ok(textOf(scene.runtime.tree).includes('输入关键词检索，或从左侧选择分类'))
+  assert.ok(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length > 0)
   scene.runtime.unmount()
 })
 
-await test('Esc 清空：effect 前这一帧也不画旧结果', async () => {
+await test('Esc 清空：effect 前这一帧直接回全部会话', async () => {
   const scene = await mountHistory()
   const input = byClass(scene.runtime.tree, 'dsh_tm_history_search')[0]
   change(input, '索引')
@@ -202,7 +224,7 @@ await test('Esc 清空：effect 前这一帧也不画旧结果', async () => {
     .props.onKeyDown({ key: 'Escape', preventDefault() {} })
   scene.runtime.renderOnce()
   assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrow').length, 0)
-  assert.ok(textOf(scene.runtime.tree).includes('输入关键词检索，或从左侧选择分类'))
+  assert.ok(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length > 0)
   scene.runtime.unmount()
 })
 
@@ -223,12 +245,12 @@ await test('分类会话列表在时间线视图下仍可达，分页重置', as
 
 await test('pageSize 按工作区读取：15 条/页即时改变行数与页数', async () => {
   const scene = await mountHistory({ memory: { 'dsh.tm.history.pageSize.ws-1': '15' } })
-  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrow').length, 15)
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length, 15)
   assert.equal(textOf(byClass(scene.runtime.tree, 'dsh_tm_histpagenum')[0]), '第 1 / 2 页')
   scene.runtime.unmount()
 })
 
-await test('分页：第 1/2 页、最后一页禁用下一页，请求 offset 正确', async () => {
+await test('分页：第 1/2/3 页、最后一页禁用下一页，全部会话客户端分页', async () => {
   const scene = await mountHistory()
   const pageLabel = () => textOf(byClass(scene.runtime.tree, 'dsh_tm_histpagenum')[0])
   assert.equal(pageLabel(), '第 1 / 3 页')
@@ -236,11 +258,14 @@ await test('分页：第 1/2 页、最后一页禁用下一页，请求 offset �
   click(next())
   await scene.runtime.settle()
   assert.equal(pageLabel(), '第 2 / 3 页')
-  assert.equal(searchCalls(scene).at(-1).body.offset, 10)
+  const secondPage = byClass(scene.runtime.tree, 'dsh_tm_histcatsession')
+  assert.equal(secondPage.length, 10)
+  assert.ok(textOf(secondPage[0]).includes('会话 11'), '第 2 页从第 11 条开始')
+  assert.equal(searchCalls(scene).length, 0, '全部模式切换页码不请求 /search')
   click(next())
   await scene.runtime.settle()
   assert.equal(pageLabel(), '第 3 / 3 页')
-  assert.equal(searchCalls(scene).at(-1).body.offset, 20)
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length, 5)
   assert.equal(next().props.disabled, true, '最后一页禁用下一页')
   scene.runtime.unmount()
 })

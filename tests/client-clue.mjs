@@ -298,7 +298,7 @@ await test('分类:名称 前缀：唯一命中 / 多候选 / 无候选 / 尾随
   assert.equal(parse('普通关键词', options).active, false)
 })
 
-await test('历史 /search：全部不带 categoryId；分类浏览不请求；默认最近轮次带 sessionIds/sort', async () => {
+await test('历史 /search：全部不带 categoryId；分类浏览和无关键词都不请求', async () => {
   const fake = makeFetch(() => ({ value: { hits: [], total: 0 } }))
   const state = { seq: 0 }
   const seqRef = {
@@ -314,16 +314,14 @@ await test('历史 /search：全部不带 categoryId；分类浏览不请求；�
   await requestHistory({ keywords: '索引', categoryId: '' })
   const categoryBrowse = await requestHistory({ keywords: '', categoryId: '__none__' })
   await requestHistory({ keywords: '索引', categoryId: 'c1' })
-  await requestHistory({ keywords: '', categoryId: '' }, { recent: true })
+  const allSessions = await requestHistory({ keywords: '', categoryId: '' })
 
   assert.equal(categoryBrowse, null, '分类浏览走 /sessions，不发 /search')
-  assert.equal(fake.calls.length, 3)
+  assert.equal(allSessions, null, '全部会话也走 /sessions，不发 /search')
+  assert.equal(fake.calls.length, 2)
   assert.equal(Object.prototype.hasOwnProperty.call(fake.calls[0].body, 'categoryId'), false, '全部不带 categoryId')
   assert.deepEqual(fake.calls[0].body, { sessionId: 's1', keywords: '索引', offset: 0, limit: 10 })
   assert.equal(fake.calls[1].body.categoryId, 'c1')
-  assert.equal(fake.calls[2].body.keywords, '', '默认最近轮次允许空关键词')
-  assert.deepEqual(fake.calls[2].body.sessionIds, ['s1'])
-  assert.equal(fake.calls[2].body.sort, 'time')
 })
 
 finish()

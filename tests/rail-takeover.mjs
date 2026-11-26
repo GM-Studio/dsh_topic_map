@@ -1260,23 +1260,35 @@ await test('⋯ → 复制轨道诊断：JSON 含量测字段并 toast', async (
   dispose()
 })
 
-await test('诊断 JSON 增加 topRight 栈：3 个元素、字段齐全、dsh_tm_ 判 culprit=ours', async () => {
+await test('诊断：6 点多采样去重、阴影扫描按右上象限过滤、culprit=ours', async () => {
   const copied = []
   const clipboard = { clipboard: { writeText(text) { copied.push(text); return Promise.resolve() } } }
   const scene = buildScene()
+  const points = []
+  const a = { tagName: 'DIV', className: 'host-shadow', id: 'host', getBoundingClientRect: () => ({ x: 1, y: 2, width: 3, height: 4 }), hasAttribute: () => false }
+  const b = { tagName: 'DIV', className: 'host-shell', id: '', getBoundingClientRect: () => ({ x: 2, y: 3, width: 4, height: 5 }), hasAttribute: () => false }
+  const c = { tagName: 'ASIDE', className: 'dsh_tm_rail foo', id: '', getBoundingClientRect: () => ({ x: 10, y: 20, width: 30, height: 40 }), hasAttribute: () => true }
   scene.doc.elementsFromPoint = (x, y) => {
-    assert.equal(x, 1256, '窗口宽 1280，右上角取 innerWidth-24')
-    assert.equal(y, 24)
-    return [
-      { tagName: 'DIV', className: 'host-shadow', id: 'host', getBoundingClientRect: () => ({ x: 1, y: 2, width: 3, height: 4 }), hasAttribute: () => false },
-      { tagName: 'ASIDE', className: 'dsh_tm_rail foo', id: '', getBoundingClientRect: () => ({ x: 10, y: 20, width: 30, height: 40 }), hasAttribute: () => true },
-      { tagName: 'BUTTON', className: 'plain', id: 'btn', getBoundingClientRect: () => ({ x: 5, y: 6, width: 7, height: 8 }), hasAttribute: () => false },
-    ]
+    points.push([x, y])
+    if (y === 24) return [a, b]
+    if (y === 88) return [b, c]
+    return [a]
   }
-  const { RAILTAKE, dispose } = makeTakeover(scene.doc, {
+  const shadowInside = { tagName: 'DIV', className: 'host-shadow', id: 'ghost', getBoundingClientRect: () => ({ x: 900, y: 100, width: 100, height: 50 }), hasAttribute: () => false }
+  const shadowOutside = { tagName: 'DIV', className: 'host-other', id: 'other', getBoundingClientRect: () => ({ x: 100, y: 100, width: 100, height: 50 }), hasAttribute: () => false }
+  const originalQuery = scene.doc.querySelectorAll.bind(scene.doc)
+  scene.doc.querySelectorAll = selector => selector.indexOf('div,nav,aside') >= 0
+    ? [shadowInside, shadowOutside] : originalQuery(selector)
+  const { RAILTAKE, dispose, win } = makeTakeover(scene.doc, {
     loadOutline: () => Promise.resolve(OUTLINE), navigator: clipboard,
   })
   await flush()
+  const originalStyle = win.getComputedStyle.bind(win)
+  win.getComputedStyle = element => {
+    const style = originalStyle(element)
+    if (element === shadowInside) return { ...style, boxShadow: '0 8px 24px #0003' }
+    return style
+  }
   const rail = railOf(scene.doc)
   rail.querySelector('.dsh_tm_railmore').dispatchEvent({ type: 'click' })
   const item = rail.querySelectorAll('.dsh_tm_railmenuitem')
@@ -1284,20 +1296,38 @@ await test('诊断 JSON 增加 topRight 栈：3 个元素、字段齐全、dsh_t
   item.dispatchEvent({ type: 'click' })
   await flush()
   const diag = JSON.parse(copied[0])
-  assert.equal(diag.topRight.length, 3)
-  assert.deepEqual(Object.keys(diag.topRight[1]).sort(), ['bg', 'cls', 'id', 'opacity', 'owner', 'pos', 'rect', 'shadow', 'tag', 'z'])
-  assert.equal(diag.topRight[1].tag, 'aside')
-  assert.equal(diag.topRight[1].cls, 'dsh_tm_rail foo')
-  assert.deepEqual(diag.topRight[1].rect, { x: 10, y: 20, w: 30, h: 40 })
+  assert.equal(points.length, 6, '6 个采样点都要调用 elementsFromPoint')
+  assert.equal(diag.topRight.length, 3, '跨采样点合并去重')
+  assert.equal(diag.topRight[2].tag, 'aside')
+  assert.equal(diag.topRight[2].cls, 'dsh_tm_rail foo')
+  assert.deepEqual(diag.topRight[2].rect, { x: 10, y: 20, w: 30, h: 40 })
+  assert.equal(diag.shadowScan.length, 1, '只留右上象限且有阴影的元素')
+  assert.equal(diag.shadowScan[0].id, 'ghost')
   assert.equal(diag.culprit, 'ours')
+  assert.equal(typeof diag.rail.rect, 'object')
+  assert.equal(typeof diag.truncated, 'undefined')
   dispose()
 })
 
-await test('topRightCulprit：没有 dsh_tm_ class 时判 host-or-other', () => {
+await test('topRightCulprit：阴影扫描优先，否则元素栈，最后 host-or-other', () => {
   const culprit = new Function(`${extractFunction(src, 'topRightCulprit')};return topRightCulprit`)()
-  assert.equal(culprit([{ cls: 'host shadow' }, { cls: 'dsh_tm_native' }]), 'ours')
-  assert.equal(culprit([{ cls: 'host shadow' }, { cls: 'other' }]), 'host-or-other')
-  assert.equal(culprit([]), 'host-or-other')
+  assert.equal(culprit([{ cls: 'host shell' }], [{ cls: 'host', owner: '' }, { cls: 'dsh_tm_rail', owner: 'ours' }]), 'ours')
+  assert.equal(culprit([{ cls: 'dsh_tm_native' }], []), 'ours')
+  assert.equal(culprit([{ cls: 'host' }], [{ cls: 'host' }]), 'host-or-other')
+})
+
+await test('fitRailDiagnostics：超过 4KB 截断并标注 truncated', () => {
+  const fit = new Function(`${extractFunction(src, 'fitRailDiagnostics')};return fitRailDiagnostics`)()
+  const big = {
+    tier: 'min', culprit: 'host-or-other',
+    topRight: Array.from({ length: 200 }, (_, i) => ({ cls: 'host-' + i, rect: { x: i, y: i, w: 10, h: 10 }, shadow: 'x'.repeat(40) })),
+    shadowScan: Array.from({ length: 50 }, (_, i) => ({ cls: 'shadow-' + i, shadow: 'y'.repeat(40) })),
+    history: { branch: 'rows' }, nativeNav: { found: true },
+  }
+  const text = fit(big)
+  assert.ok(text.length <= 4096, 'JSON 不得超过 4KB：' + text.length)
+  const parsed = JSON.parse(text)
+  assert.equal(parsed.truncated, true)
 })
 
 await test('原生模式：右缘药丸存在，点击写 native=0 并立即接管', async () => {
@@ -1320,6 +1350,18 @@ await test('原生模式：右缘药丸存在，点击写 native=0 并立即接�
   assert.ok(railOf(scene.doc) !== null, '点击后立即接管')
   assert.equal(scene.nav.style.visibility, 'hidden')
   assert.equal(scene.doc.querySelector('.dsh_tm_railrestore'), null, '接管后药丸必须消失')
+  dispose()
+})
+
+await test('原生模式药丸：容器高度为 0 时用视口中线，不贴右上角', async () => {
+  const scene = buildScene({ containerHeight: 0 })
+  const store = makeStore({ 'dsh.tm.rail.native': '1' })
+  const { dispose } = makeTakeover(scene.doc, { store, loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  const pill = scene.doc.querySelector('.dsh_tm_railrestore')
+  assert.ok(pill !== null)
+  const top = Number(String(pill.style.top).replace('px', ''))
+  assert.ok(top >= 300, '零高容器不能把药丸算到顶部：top=' + pill.style.top)
   dispose()
 })
 

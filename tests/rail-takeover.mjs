@@ -153,7 +153,8 @@ class FakeElement {
 
   getBoundingClientRect() {
     const width = this.width === undefined ? 100 : this.width
-    return { top: this.top, bottom: this.top + this.height, height: this.height, left: 0, right: width, width }
+    const left = this.left === undefined ? 0 : this.left
+    return { top: this.top, bottom: this.top + this.height, height: this.height, left, right: left + width, width }
   }
 }
 
@@ -678,7 +679,7 @@ await test('宽度公式：700 / 1200 / 2000 容器下 std/max 落在范围，st
     RAILTAKE.setTier('max')
     assert.equal(rail.style['--dsh-tm-rail-visible-width'], expectedMax + 'px', width + ' max')
     assert.ok(expectedStd < expectedMax, 'std < max')
-    assert.ok(rail.style.clipPath !== undefined)
+    assert.equal(rail.style.clipPath, 'none', '不使用裁剪')
     dispose()
   }
 })
@@ -687,6 +688,7 @@ await test('源码不再有 railgrip / dsh.tm.rail.width / data-collapsed', asyn
   assert.equal(src.includes('dsh_tm_railgrip'), false)
   assert.equal(src.includes('dsh.tm.rail.width'), false)
   assert.equal(src.includes('dsh_tm_rail[data-collapsed'), false)
+  assert.equal(src.includes('inset(0 0 0'), false, '不再用左侧 clip-path 裁剪')
   assert.ok(src.includes('--dsh-tm-rail-visible-width'))
   assert.ok(src.includes('clamp(18px,1.6vh,24px)'))
   assert.ok(src.includes('clamp(10px,0.75vw,12px)'))
@@ -921,12 +923,23 @@ await test('min 档按最大轮号位数：1/2/3/4 位数字完整且保留刻�
     const rail = railOf(scene.doc)
     const expected = Math.min(44, Math.max(28, String(maxTurn).length * 7 + 10))
     assert.equal(rail.style['--dsh-tm-rail-visible-width'], expected + 'px')
+    assert.equal(rail.style.width, expected + 'px', 'min 档轨道宽度就是可见宽度')
+    assert.equal(rail.style.clipPath, 'none', 'min 档不能再用左侧裁剪')
+    rail.width = expected
+    assert.equal(rail.getBoundingClientRect().width, expected, '轨道 rect 宽度 = visible')
     const nums = rail.querySelectorAll('.dsh_tm_railnum')
     assert.deepEqual(nums.map(node => node.textContent), ['1', String(maxTurn)])
     assert.equal(rail.querySelectorAll('.dsh_tm_railtick').length, 2)
     for (const num of nums) {
-      num.scrollWidth = String(num.textContent).length * 7
-      num.clientWidth = expected - 8
+      const needed = String(num.textContent).length * 7
+      num.scrollWidth = needed
+      num.clientWidth = needed
+      num.width = needed
+      num.left = expected - 2 - needed
+      const numRect = num.getBoundingClientRect()
+      const railRect = rail.getBoundingClientRect()
+      assert.ok(numRect.left >= railRect.left, `${maxTurn} 数字左边不越界`)
+      assert.ok(numRect.right <= railRect.right, `${maxTurn} 数字右边不越界`)
       assert.ok(num.scrollWidth <= num.clientWidth, `${maxTurn} 数字不裁切`)
     }
     dispose()

@@ -200,7 +200,7 @@ await test('categoryId=__none__：只检索未归类，悬空分类也算未归�
 
 // ── 4. 不传 categoryId：口径不变（全部） ───────────────────────────
 
-await test('不传 categoryId：仍是全部会话，响应字段不变', async () => {
+await test('不传 categoryId：仍是全部会话，响应含分页字段', async () => {
   await withTempHome(async home => {
     await writeStore(home)
     const ctx = await prepare()
@@ -208,8 +208,8 @@ await test('不传 categoryId：仍是全部会话，响应字段不变', async 
     assert.equal(result.total, ALL_SESSIONS.length)
     assert.equal(result.coverage.sessions, ALL_SESSIONS.length)
     assert.deepEqual(Object.keys(result).sort(), [
-      'coverage', 'elapsedMs', 'hits', 'indexed', 'scanned', 'total', 'truncated',
-      'workspace', 'workspaceId',
+      'coverage', 'elapsedMs', 'hasMore', 'hits', 'indexed', 'offset', 'scanned',
+      'total', 'truncated', 'workspace', 'workspaceId',
     ])
     assert.deepEqual(Object.keys(result.coverage).sort(), [
       'indexed', 'indexing', 'scannedFromLog', 'sessions',

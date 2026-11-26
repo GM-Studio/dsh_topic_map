@@ -2,8 +2,8 @@
  * 检索端点测试（P0-3）：POST /api/topic-map/search 的接线层。
  *
  * 只测"接线"：会话枚举、索引/回退双数据源、stamp（sessionId/title）、
- * 过滤与排序透传、limit 上限、ready/missing 口径、后台补索引不阻塞。
- * 检索口径本身由 tests/search-index.mjs 覆盖。
+ * 过滤与排序透传、limit 上限、offset/hasMore 分页、ready/missing 口径、
+ * 后台补索引不阻塞。检索口径本身由 tests/search-index.mjs 覆盖。
  *
  * Run: node tests/search-endpoint.mjs
  */
@@ -500,6 +500,173 @@ await test('limit 上限 200；空 keywords 是浏览态', async () => {
   })
 })
 
+// ── 分页（offset / hasMore） ────────────────────────────────────────
+
+await test('offset/limit 真分页：首页/第二页/末页/越界，total 不随分页变化', async () => {
+  await withTempHome(async () => {
+    const specs = Array.from({ length: 5 }, (_, index) => ({
+      prompt: `分页 第 ${index} 轮`,
+      response: `答 ${index}`,
+    }))
+    const { ctx } = makeCtx({ events: { 'sess-page': makeEvents(specs) } })
+    await syncSessionIndexFor(ctx, 'sess-page')
+    const base = {
+      workspaceId: 'ws-1',
+      keywords: '分页',
+      sort: 'time',
+      now: BASE_TIME + 10 * 60_000,
+      limit: 2,
+    }
+
+    const page1 = await searchWorkspaceIndex(ctx, { ...base, offset: 0 })
+    const page2 = await searchWorkspaceIndex(ctx, { ...base, offset: 2 })
+    const page3 = await searchWorkspaceIndex(ctx, { ...base, offset: 4 })
+    const beyond = await searchWorkspaceIndex(ctx, { ...base, offset: 10 })
+
+    for (const page of [page1, page2, page3, beyond]) {
+      assert.equal(page.total, 5, 'total 是过滤后总命中数，不受 offset/limit 影响')
+    }
+    assert.equal(page1.offset, 0)
+    assert.equal(page2.offset, 2)
+    assert.equal(page3.offset, 4)
+    assert.equal(beyond.offset, 10)
+
+    assert.deepEqual(page1.hits.map(hit => hit.turn), [4, 3], 'sort=time 倒序，首页取前 2')
+    assert.deepEqual(page2.hits.map(hit => hit.turn), [2, 1])
+    assert.deepEqual(page3.hits.map(hit => hit.turn), [0])
+    assert.deepEqual(beyond.hits, [], 'offset 越界返回空数组')
+
+    assert.equal(page1.hasMore, true)
+    assert.equal(page2.hasMore, true)
+    assert.equal(page3.hasMore, false, '末页 offset + 返回条数 = total')
+    assert.equal(beyond.hasMore, false)
+    assert.equal(page1.truncated, true)
+    assert.equal(page3.truncated, false)
+
+    const all = [...page1.hits, ...page2.hits, ...page3.hits].map(hit => hit.turn)
+    assert.deepEqual(all, [4, 3, 2, 1, 0], '跨页拼接不重不漏')
+  })
+})
+
+await test('分页默认 limit=50：首页 50、第二页剩余，hasMore 边界正确', async () => {
+  await withTempHome(async () => {
+    const specs = Array.from({ length: 60 }, (_, index) => ({
+      prompt: `默认分页 ${index}`,
+      response: `答 ${index}`,
+    }))
+    const { ctx } = makeCtx({ events: { 'sess-60': makeEvents(specs) } })
+    await syncSessionIndexFor(ctx, 'sess-60')
+    const base = {
+      workspaceId: 'ws-1',
+      keywords: '默认分页',
+      sort: 'time',
+      now: BASE_TIME + 100 * 60_000,
+    }
+
+    const first = await searchWorkspaceIndex(ctx, base)
+    const second = await searchWorkspaceIndex(ctx, { ...base, offset: 50 })
+    assert.equal(first.total, 60)
+    assert.equal(first.hits.length, 50, '未给 limit 时沿用默认 50')
+    assert.equal(first.hasMore, true)
+    assert.equal(second.hits.length, 10)
+    assert.equal(second.hasMore, false)
+    assert.equal(second.total, 60)
+  })
+})
+
+await test('非法 offset 归 0：负数 / 非数字 / null', async () => {
+  await withTempHome(async () => {
+    const specs = Array.from({ length: 3 }, (_, index) => ({ prompt: `偏移 ${index}` }))
+    const { ctx } = makeCtx({ events: { 'sess-offset': makeEvents(specs) } })
+    await syncSessionIndexFor(ctx, 'sess-offset')
+    const base = { workspaceId: 'ws-1', keywords: '偏移', limit: 2, now: BASE_TIME + 10_000 }
+    const normal = await searchWorkspaceIndex(ctx, { ...base, offset: 0 })
+    for (const offset of [-1, -99, 'abc', {}, null, NaN, Infinity]) {
+      const result = await searchWorkspaceIndex(ctx, { ...base, offset })
+      assert.equal(result.offset, 0, `offset=${String(offset)} 应归一为 0`)
+      assert.deepEqual(result.hits.map(hit => hit.turn), normal.hits.map(hit => hit.turn))
+      assert.equal(result.hasMore, normal.hasMore)
+    }
+  })
+})
+
+await test('同分排序跨页稳定：sort=time 同结束时间按原顺序，拼接不重不漏', async () => {
+  await withTempHome(async () => {
+    const events = {
+      'sess-tie-a': makeEvents([{ prompt: '同分词 甲' }], 0),
+      'sess-tie-b': makeEvents([{ prompt: '同分词 乙' }], 0),
+    }
+    const { ctx } = makeCtx({ events, sessions: ['sess-tie-a', 'sess-tie-b'] })
+    await syncSessionIndexFor(ctx, 'sess-tie-a')
+    await syncSessionIndexFor(ctx, 'sess-tie-b')
+    const base = { workspaceId: 'ws-1', keywords: '同分词', sort: 'time', now: BASE_TIME + 10_000 }
+    const full = await searchWorkspaceIndex(ctx, { ...base, limit: 10 })
+    const page1 = await searchWorkspaceIndex(ctx, { ...base, limit: 1, offset: 0 })
+    const page2 = await searchWorkspaceIndex(ctx, { ...base, limit: 1, offset: 1 })
+    assert.equal(full.total, 2)
+    assert.equal(full.hits[0].time, full.hits[1].time, '两命中同分/同时间')
+    assert.deepEqual(
+      [...page1.hits, ...page2.hits].map(hit => hit.sessionId),
+      full.hits.map(hit => hit.sessionId),
+      '同分时跨页顺序必须与一次性返回一致',
+    )
+    assert.equal(page1.hasMore, true)
+    assert.equal(page2.hasMore, false)
+  })
+})
+
+await test('groupBy=session：对组分页、组内 hits 不截断，hasMore 按组数判断', async () => {
+  await withTempHome(async () => {
+    const sessions = Array.from({ length: 5 }, (_, index) => `sess-group-${index}`)
+    const events = Object.fromEntries(sessions.map(id => [
+      id,
+      makeEvents([
+        { prompt: `分组词 ${id} 第一轮` },
+        { prompt: `分组词 ${id} 第二轮` },
+      ]),
+    ]))
+    const { ctx } = makeCtx({ events, sessions })
+    for (const id of sessions) await syncSessionIndexFor(ctx, id)
+    const base = {
+      workspaceId: 'ws-1',
+      keywords: '分组词',
+      groupBy: 'session',
+      limit: 2,
+      now: BASE_TIME + 10 * 60_000,
+    }
+
+    const full = await searchWorkspaceIndex(ctx, { ...base, limit: 10 })
+    const page1 = await searchWorkspaceIndex(ctx, { ...base, offset: 0 })
+    const page2 = await searchWorkspaceIndex(ctx, { ...base, offset: 2 })
+    const page3 = await searchWorkspaceIndex(ctx, { ...base, offset: 4 })
+    const beyond = await searchWorkspaceIndex(ctx, { ...base, offset: 6 })
+
+    assert.equal(full.total, 10, 'total 仍是过滤后的命中数（5 会话 × 2 轮）')
+    assert.equal(full.hits.length, 5)
+    for (const page of [page1, page2, page3, beyond]) assert.equal(page.total, 10)
+
+    assert.deepEqual(page1.hits.map(group => group.sessionId), full.hits.slice(0, 2).map(group => group.sessionId))
+    assert.deepEqual(page2.hits.map(group => group.sessionId), full.hits.slice(2, 4).map(group => group.sessionId))
+    assert.deepEqual(page3.hits.map(group => group.sessionId), full.hits.slice(4).map(group => group.sessionId))
+    assert.deepEqual(beyond.hits, [])
+
+    for (const group of [...page1.hits, ...page2.hits, ...page3.hits]) {
+      assert.equal(group.hits.length, 2, '组内 hits 不随组的分页被截断')
+      assert.equal(group.count, 2)
+    }
+
+    assert.equal(page1.hasMore, true)
+    assert.equal(page2.hasMore, true)
+    assert.equal(page3.hasMore, false, 'offset+返回组数 = 组总数')
+    assert.equal(beyond.hasMore, false)
+    assert.equal(page3.hits.length, 1, '末页只剩 1 组')
+    // 若按命中数判断，page3 是 4+1 组 ×2 命中 = 10 条中的 2 条，会误判 hasMore；
+    // 这里必须按组数：5 组里已到第 5 组，没有更多。
+    assert.equal(page3.total, 10)
+    assert.equal(page3.hasMore, false)
+  })
+})
+
 // ── 性能与边界 ──────────────────────────────────────────────────────
 
 await test('141 轮语料：elapsedMs 可测且远低于上限', async () => {
@@ -537,6 +704,8 @@ await test('没有工作区：返回空结果骨架（不抛错）', async () =>
   assert.equal(result.total, 0)
   assert.equal(result.scanned, 0)
   assert.equal(result.truncated, false)
+  assert.equal(result.offset, 0)
+  assert.equal(result.hasMore, false)
   assert.deepEqual(result.indexed, { ready: 0, missing: 0 })
   assert.equal(typeof result.elapsedMs, 'number')
 })
@@ -670,8 +839,8 @@ await test('响应契约字段齐全', async () => {
     const { ctx } = makeCtx({ events: { 'sess-shape': makeEvents([{ prompt: '形状 词' }]) } })
     const result = await searchWorkspaceIndex(ctx, { workspaceId: 'ws-1', keywords: '词' })
     assert.deepEqual(Object.keys(result).sort(), [
-      'coverage', 'elapsedMs', 'hits', 'indexed', 'scanned', 'total', 'truncated',
-      'workspace', 'workspaceId',
+      'coverage', 'elapsedMs', 'hasMore', 'hits', 'indexed', 'offset', 'scanned',
+      'total', 'truncated', 'workspace', 'workspaceId',
     ])
     assert.deepEqual(Object.keys(result.indexed).sort(), ['missing', 'ready'])
     assert.deepEqual(Object.keys(result.coverage).sort(), [

@@ -45,8 +45,10 @@ import {
   STARTUP_SCAN_WORKSPACE_QUOTA,
   addAutoProcessedSessions,
   applyAutoClassification,
+  applyColdStartBatch,
   applyMaintenanceSteps,
   buildMaintenancePrompt,
+  categoryPathOf,
   configureAutoClassify,
   createAutoClassifyQueue,
   createAutoStartThrottle,
@@ -354,6 +356,7 @@ await test('判定：已归类、已锁定、路径非法都跳过', () => {
     action: 'assign',
     categoryId: 'c-x',
     path: ['已有'],
+    reusedExisting: true,
   })
   const fresh = planAutoSuggestion(store, 's-new', { categoryPath: ['新大类', '子类'] })
   assert.equal(fresh.action, 'new')
@@ -436,6 +439,74 @@ await test('路径解析：逐级复用已有父分类，只补缺的那一级',
   assert.deepEqual(listCategoryPaths(store).map(item => item.pathText), ['插件开发'])
 })
 
+// ── 冷启动批量归类 ────────────────────────────────────────────────
+
+/** 用户实测的 6 条建议形状（置信度按模型正常输出给高值）。 */
+function coldStartSuggestions(confidence = 0.85) {
+  return [
+    { sessionId: 'cold-1', categoryPath: ['插件开发', '话题地图插件'], confidence },
+    { sessionId: 'cold-2', categoryPath: ['插件开发', '话题地图插件'], confidence },
+    { sessionId: 'cold-3', categoryPath: ['插件开发', 'API接入'], confidence },
+    { sessionId: 'cold-4', categoryPath: ['会话管理', '归类检索'], confidence },
+    { sessionId: 'cold-5', categoryPath: ['黑苹果', '驱动调研'], confidence },
+    { sessionId: 'cold-6', categoryPath: ['黑苹果', '系统安装'], confidence },
+  ]
+}
+
+function pathTextOf(store, categoryId) {
+  return (categoryPathOf(store, categoryId) ?? []).join(' > ')
+}
+
+await test('冷启动批量：6 条建议一次全部落库（含单票叶子与单票父级）', () => {
+  const store = baseStore()
+  const result = applyColdStartBatch(store, coldStartSuggestions())
+  assert.equal(result.assigned.length, 6)
+  assert.equal(result.kept.length, 0)
+  assert.equal(result.store.categories.length, 8, '3 个大类 + 5 个子类')
+  const expected = {
+    'cold-1': '插件开发 > 话题地图插件',
+    'cold-2': '插件开发 > 话题地图插件',
+    'cold-3': '插件开发 > API接入',
+    'cold-4': '会话管理 > 归类检索',
+    'cold-5': '黑苹果 > 驱动调研',
+    'cold-6': '黑苹果 > 系统安装',
+  }
+  for (const [sessionId, path] of Object.entries(expected)) {
+    const assignment = result.store.assignments[sessionId]
+    assert.equal(assignment.source, 'model')
+    assert.equal(pathTextOf(result.store, assignment.categoryId), path)
+  }
+  for (const category of result.store.categories) assert.equal(category.source, 'model')
+})
+
+await test('冷启动批量：低置信度叶子 1 票 → 父级 ≥2 票时落到父级；都不够则保持未归类', () => {
+  const result = applyColdStartBatch(baseStore(), coldStartSuggestions(0.3))
+  assert.equal(result.assigned.length, 5)
+  assert.equal(result.kept.length, 1)
+  assert.equal(result.kept[0].sessionId, 'cold-4', '会话管理整条只有 1 票，应保持未归类')
+  assert.equal(result.kept[0].reason, 'low-confidence')
+  // 父级「插件开发」「黑苹果」各 ≥2 票：单票叶子回退到父级，而不是丢会话。
+  assert.equal(pathTextOf(result.store, result.store.assignments['cold-3'].categoryId), '插件开发')
+  assert.equal(pathTextOf(result.store, result.store.assignments['cold-5'].categoryId), '黑苹果')
+  assert.equal(pathTextOf(result.store, result.store.assignments['cold-6'].categoryId), '黑苹果')
+  assert.deepEqual(result.store.categories.map(item => item.name).sort(), ['插件开发', '黑苹果', '话题地图插件'].sort())
+})
+
+await test('冷启动批量：模型没给 confidence 时不当作存疑，全部落库', () => {
+  const suggestions = coldStartSuggestions(0).map(item => ({ ...item, confidenceMissing: true }))
+  const result = applyColdStartBatch(baseStore(), suggestions)
+  assert.equal(result.assigned.length, 6, '缺 confidence 是旧模型常见输出，不能用 1 票阈值丢掉')
+  assert.equal(result.kept.length, 0)
+})
+
+await test('冷启动批量：已锁定会话不参与，低置信度不覆盖它', () => {
+  const store = baseStore({ lockedSessions: { 'cold-1': { at: 1, by: 'user' } } })
+  const result = applyColdStartBatch(store, coldStartSuggestions(0.9))
+  assert.equal(result.store.assignments['cold-1'], undefined)
+  assert.equal(result.assigned.some(item => item.sessionId === 'cold-1'), false)
+  assert.equal(result.kept.some(item => item.sessionId === 'cold-1'), true)
+})
+
 // ── 宿主自动归类执行体 ────────────────────────────────────────────
 
 await test('执行体：已归类会话直接跳过，模型一次都不调', async () => {
@@ -488,6 +559,111 @@ await test('执行体：模型从已有分类里选 → 归类 source:model，�
     const raw = await readRawStore(home)
     assert.deepEqual(raw.assignments['sess-auto'], { categoryId: 'c-exist', source: 'model' })
     assert.ok(llm.users[0].includes('已有分类'), '自动归类提示词必须带上现有分类路径')
+  })
+})
+
+// ── 冷启动：队列批量落库（reset 后不再永远 0 分类） ──────────────
+
+await test('冷启动执行体：6 个未归类会话一次批量调用、6 条建议全部落库', async () => {
+  await withTempHome(async home => {
+    const workspaceId = 'ws-auto-cold'
+    const sessions = ['cold-1', 'cold-2', 'cold-3', 'cold-4', 'cold-5', 'cold-6']
+    const events = Object.fromEntries(sessions.map(id => [id, makeEvents()]))
+    const reply = JSON.stringify(coldStartSuggestions(0.9).map(item => ({
+      sessionId: item.sessionId,
+      path: item.categoryPath,
+      confidence: item.confidence,
+    })))
+    const llm = makeFakeLlm(reply)
+    const base = makeMultiCtx({ [workspaceId]: sessions }, { events, llm })
+    const registered = []
+    const webScope = {
+      get(name) {
+        if (name !== 'webServer') return undefined
+        return {
+          register(config) {
+            registered.push(config)
+            return () => {}
+          },
+        }
+      },
+      effect(fn) { fn() },
+    }
+    const ctx = {
+      ...base,
+      inject(names, callback) {
+        if (names.includes('webServer')) callback(webScope)
+      },
+      effect(fn) { fn() },
+    }
+    apply(ctx)
+    assert.equal(registered.length, 1)
+    clearAutoClassifyDiagnostics()
+
+    const started = await startCategoryAuto(ctx, { workspaceId })
+    assert.equal(started.ok, true, started.error)
+    assert.equal(started.value.queued, 6)
+    await flushAutoClassify()
+
+    const raw = await readRawStore(home, workspaceId)
+    assert.equal(Object.keys(raw.assignments).length, 6, JSON.stringify(raw.assignments))
+    assert.equal(raw.categories.length, 8, '3 个大类 + 5 个子类')
+    assert.equal(llm.calls, 1, '冷启动必须一次批量调用，而不是每个会话各调一次')
+    // 提示词里 6 个会话都在同一批材料里（批量证据）。
+    for (const sessionId of sessions) assert.ok(llm.users[0].includes(sessionId))
+
+    const expected = {
+      'cold-1': '插件开发 > 话题地图插件',
+      'cold-2': '插件开发 > 话题地图插件',
+      'cold-3': '插件开发 > API接入',
+      'cold-4': '会话管理 > 归类检索',
+      'cold-5': '黑苹果 > 驱动调研',
+      'cold-6': '黑苹果 > 系统安装',
+    }
+    for (const [sessionId, path] of Object.entries(expected)) {
+      const assignment = raw.assignments[sessionId]
+      assert.equal(assignment.source, 'model')
+      assert.equal(pathTextOf(raw, assignment.categoryId), path)
+    }
+
+    const coldDiag = getAutoClassifyDiagnostics(50)
+      .find(entry => entry.kind === 'cold-start' && entry.workspaceId === workspaceId)
+    assert.ok(coldDiag, '冷启动应留一条诊断')
+    assert.equal(coldDiag.sessions, 6)
+    assert.equal(coldDiag.assigned, 6)
+
+    // 同一队列代里其他会话已经参与过批量，不再重复调模型。
+    const again = await autoClassifySession(ctx, 'cold-2')
+    assert.equal(again.reason, 'classified')
+    assert.equal(llm.calls, 1)
+  })
+})
+
+await test('稳态：已有分类命中直接复用（不要票数）；全新路径 1 票仍不建类', async () => {
+  await withTempHome(async home => {
+    await writeRawStore(home, baseStore({
+      categories: [{ id: 'c-parent', name: '插件开发', parentId: null, source: 'model' }],
+    }))
+    const llm = makeFakeLlm('[{"sessionId":"steady-1","path":["插件开发","新子类"],"confidence":0.9}]')
+    const ctx = makeCtx({
+      sessions: ['steady-1'],
+      events: { 'steady-1': makeEvents() },
+      llm,
+    })
+    const result = await autoClassifySession(ctx, 'steady-1')
+    assert.equal(result.status, 'assigned', JSON.stringify(result))
+    const raw = await readRawStore(home)
+    assert.deepEqual(raw.assignments['steady-1'], { categoryId: 'c-parent', source: 'model' })
+    assert.equal(raw.categories.length, 1, '已有祖先命中时不应新建「新子类」')
+
+    const pending = applyAutoClassification(
+      baseStore(),
+      'fresh-1',
+      { categoryPath: ['全新类', '子类'] },
+      createNewCategorySupport(),
+    )
+    assert.equal(pending.action, 'pending-new', '稳态下全新路径 1 票不能建类')
+    assert.deepEqual(pending.store.categories, [])
   })
 })
 

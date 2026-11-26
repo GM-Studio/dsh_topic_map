@@ -1,6 +1,6 @@
 {
   "name": "dsh-topic-map",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "话题地图：把工作区的会话画成可导航的地图——话题 → 对话 → 会话 → 泳道图，支持跨会话归类、正文检索、实时更新与跳回对话",
   "icon": "icon.svg",
   "type": "module",

@@ -162,6 +162,34 @@ class FakeElement {
     const left = this.left === undefined ? 0 : this.left
     return { top: this.top, bottom: this.top + height, height, left, right: left + width, width }
   }
+
+  /** 最小档真实 chrome 的假布局：容器 6px + 行 4px + 边框 2px。 */
+  get clientWidth() {
+    if (!String(this.className).split(' ').includes('dsh_tm_railrow')) {
+      return this._clientWidth !== undefined ? this._clientWidth : (this.width === undefined ? 0 : this.width)
+    }
+    let node = this.parentElement
+    let railWidth = 0
+    while (node !== null && node !== undefined) {
+      if (String(node.className).split(' ').includes('dsh_tm_rail')) {
+        railWidth = Number.parseFloat(String(node.style.width || '0')) || 0
+        break
+      }
+      node = node.parentElement
+    }
+    return Math.max(0, railWidth - 2 - 6 - 4)
+  }
+  set clientWidth(value) { this._clientWidth = value }
+
+  get scrollWidth() {
+    if (!String(this.className).split(' ').includes('dsh_tm_railrow')) {
+      return this._scrollWidth !== undefined ? this._scrollWidth : (this.width === undefined ? 0 : this.width)
+    }
+    const num = typeof this.querySelector === 'function' ? this.querySelector('.dsh_tm_railnum') : null
+    const textWidth = num === null ? 0 : 18 + 7 * Math.max(0, String(num.textContent || '').length - 1)
+    return Math.max(this.clientWidth, 2 + 3 + textWidth)
+  }
+  set scrollWidth(value) { this._scrollWidth = value }
 }
 
 // ── 极简选择器：只支持本测试与接管代码用到的写法 ─────────────────────
@@ -920,6 +948,7 @@ await test('抽屉覆盖模式：setDockObscured', async () => {
 })
 
 await test('min 档按最大轮号位数：1/2/3/4 位数字完整且保留刻度', async () => {
+  const widths = []
   for (const maxTurn of [7, 12, 112, 1120]) {
     const outline = {
       available: true,
@@ -934,13 +963,18 @@ await test('min 档按最大轮号位数：1/2/3/4 位数字完整且保留刻�
     RAILTAKE.setTier('min')
     const rail = railOf(scene.doc)
     const measured = 18 + 7 * (String(maxTurn).length - 1)
-    const expected = Math.round(measured + 14)
+    const expected = Math.round(measured + 18)
     assert.equal(rail.style['--dsh-tm-rail-num-width'], measured + 'px', '量尺宽度写进 CSS 变量')
     assert.equal(rail.style['--dsh-tm-rail-visible-width'], expected + 'px')
     assert.equal(rail.style.width, expected + 'px', 'min 档轨道宽度就是可见宽度')
+    widths.push(expected)
     assert.equal(rail.style.clipPath, 'none', 'min 档不能再用左侧裁剪')
+    assert.ok(RAILTAKE.fitIterations() <= 3, '溢出迭代不超过 3 次')
     rail.width = expected
     assert.equal(rail.getBoundingClientRect().width, expected, '轨道 rect 宽度 = visible')
+    const firstRow = rail.querySelector('.dsh_tm_railrow')
+    firstRow.width = expected - 12
+    assert.ok(firstRow.scrollWidth <= firstRow.clientWidth, '行不溢出')
     const nums = rail.querySelectorAll('.dsh_tm_railnum')
     assert.deepEqual(nums.map(node => node.textContent), ['1', String(maxTurn)])
     const ticks = rail.querySelectorAll('.dsh_tm_railtick')
@@ -956,16 +990,17 @@ await test('min 档按最大轮号位数：1/2/3/4 位数字完整且保留刻�
       num.scrollWidth = needed
       num.clientWidth = needed
       num.width = needed
-      // rail 内容区 = 边框内宽；row padding 3 + tick 2 + gap 4。
-      num.left = 1 + 3 + 2 + 4
+      // 6px 行容器 padding + 2px 行 padding + 1px 边框 + 2px 刻度 + 3px gap。
+      num.left = 1 + 6 + 2 + 2 + 3
       const numRect = num.getBoundingClientRect()
       const railRect = rail.getBoundingClientRect()
-      assert.ok(numRect.left >= railRect.left + 1, `${maxTurn} 数字左边有边距`)
-      assert.ok(numRect.right <= railRect.right - 1, `${maxTurn} 数字右边有边距`)
+      assert.ok(numRect.left >= railRect.left + 2, `${maxTurn} 数字左边有边距`)
+      assert.ok(numRect.right <= railRect.right - 2, `${maxTurn} 数字右边有边距`)
       assert.ok(num.scrollWidth <= num.clientWidth, `${maxTurn} 数字不裁切`)
     }
     dispose()
   }
+  assert.deepEqual(widths, [36, 43, 50, 57], 'rail 宽度随位数单调递增')
 })
 
 await test('容器滚动改变 → 轨道 active 跟着变，行节点引用不变', async () => {

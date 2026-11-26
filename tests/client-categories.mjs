@@ -81,6 +81,7 @@ const COMPONENT_SOURCE = [
   extractFunction(src, 'categoryAutoText'),
   extractFunction(src, 'categoryAutoNoModel'),
   extractFunction(src, 'categoryAutoUnclassified'),
+  extractFunction(src, 'CategoryAutoStatus'),
   extractFunction(src, 'sessionTimeInfoOf'),
   extractFunction(src, 'requestTopicMap'),
   extractFunction(src, 'resolveWorkspaceIdForSession'),
@@ -113,7 +114,7 @@ async function mount(options = {}) {
     ],
     [
       ALL_ID, ALL_NAME, ROOT_ID, ROOT_NAME,
-      15000, 8,
+      30000, 4,
       fake.fetch, error => String(error && error.message ? error.message : error),
       function () {}, () => Promise.resolve('ws-1'),
     ],
@@ -160,6 +161,31 @@ await test('子孙会话计入顶层胶囊；未归类只在有未归类会话�
   await noRoot.runtime.settle()
   assert.equal(pillTexts(noRoot.runtime.tree).includes(ROOT_NAME), false)
   noRoot.runtime.unmount()
+})
+
+await test('未归类且全部锁定：不显示「未归类」', async () => {
+  const store = { version: 1, categories: [], assignments: {} }
+  const lockedSessions = {}
+  for (const session of SESSIONS) lockedSessions[session.sessionId] = { at: 1, by: 'user' }
+  const locked = await mount({ store, lockedSessions })
+  await locked.runtime.settle()
+  assert.equal(pillTexts(locked.runtime.tree).includes(ROOT_NAME), false)
+  locked.runtime.unmount()
+})
+
+await test('子类会话数为 0 的分类不进入胶囊（含更多）', async () => {
+  const store = fixtureStore()
+  store.categories.push({ id: 'c-empty', name: '空分类', parentId: null })
+  const scene = await mount({ store })
+  await scene.runtime.settle()
+  assert.equal(pillTexts(scene.runtime.tree).includes('空分类'), false)
+  const more = byClass(scene.runtime.tree, 'dsh_tm_histcatpill').find(node => textOf(node).includes('更多'))
+  if (more !== undefined) {
+    click(more)
+    await scene.runtime.settle()
+    assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histcatmoreitem').map(textOf).includes('空分类'), false)
+  }
+  scene.runtime.unmount()
 })
 
 await test('lockedSessions 随 /categories 原样带给历史行', async () => {
@@ -217,7 +243,7 @@ await test('状态 no-model：灰字提示未配置模型，不弹错误', async
   runtime.unmount()
 })
 
-await test('自动归类轮询：最多 8 次，切工作区清理定时器', async () => {
+await test('自动归类轮询：最多 4 次，切工作区清理定时器', async () => {
   const realSetTimeout = globalThis.setTimeout
   const realClearTimeout = globalThis.clearTimeout
   const timers = []
@@ -235,16 +261,17 @@ await test('自动归类轮询：最多 8 次，切工作区清理定时器', as
     const { runtime, fake } = await mount({ store: { version: 1, categories: [], assignments: {} } })
     await runtime.settle()
     assert.equal(fake.calls.filter(call => call.action === 'category-auto-status').length, 1)
-    for (let i = 0; i < 7; i += 1) {
+    for (let i = 0; i < 3; i += 1) {
       const timer = timers.find(item => item.cancelled !== true)
       assert.ok(timer !== undefined, '第 ' + (i + 1) + ' 次轮询定时器应存在')
+      assert.equal(timer.ms, 30000)
       timer.cancelled = true
       timer.fn()
       for (let k = 0; k < 12; k += 1) await Promise.resolve()
       await runtime.settle()
     }
-    assert.equal(fake.calls.filter(call => call.action === 'category-auto-status').length, 8, '最多 8 次')
-    assert.equal(timers.find(item => item.cancelled !== true), undefined, '第 8 次后不再排定时器')
+    assert.equal(fake.calls.filter(call => call.action === 'category-auto-status').length, 4, '最多 4 次')
+    assert.equal(timers.find(item => item.cancelled !== true), undefined, '第 4 次后不再排定时器')
     runtime.unmount()
 
     const second = await mount({ store: { version: 1, categories: [], assignments: {} } })
@@ -260,6 +287,49 @@ await test('自动归类轮询：最多 8 次，切工作区清理定时器', as
   } finally {
     globalThis.setTimeout = realSetTimeout
     globalThis.clearTimeout = realClearTimeout
+  }
+})
+
+await test('页面隐藏时跳过轮询，恢复可见后继续', async () => {
+  const realSetTimeout = globalThis.setTimeout
+  const realClearTimeout = globalThis.clearTimeout
+  const previousDocument = globalThis.document
+  const timers = []
+  let nextId = 1
+  globalThis.setTimeout = (fn, ms) => {
+    const timer = { id: nextId++, fn, ms, cancelled: false }
+    timers.push(timer)
+    return timer.id
+  }
+  globalThis.clearTimeout = id => {
+    const timer = timers.find(item => item.id === id)
+    if (timer !== undefined) timer.cancelled = true
+  }
+  globalThis.document = { visibilityState: 'hidden' }
+  try {
+    const { runtime, fake } = await mount({ store: { version: 1, categories: [], assignments: {} } })
+    await runtime.settle()
+    assert.equal(fake.calls.filter(call => call.action === 'category-auto-status').length, 0)
+    const hiddenTimer = timers.find(item => item.cancelled !== true)
+    hiddenTimer.cancelled = true
+    hiddenTimer.fn()
+    for (let k = 0; k < 12; k += 1) await Promise.resolve()
+    await runtime.settle()
+    assert.equal(fake.calls.filter(call => call.action === 'category-auto-status').length, 0, '隐藏时跳过状态请求')
+    const visibleTimer = timers.find(item => item.cancelled !== true)
+    assert.ok(visibleTimer !== undefined, '隐藏期间仍保留下一次定时')
+    globalThis.document.visibilityState = 'visible'
+    visibleTimer.cancelled = true
+    visibleTimer.fn()
+    for (let k = 0; k < 12; k += 1) await Promise.resolve()
+    await runtime.settle()
+    assert.equal(fake.calls.filter(call => call.action === 'category-auto-status').length, 1, '恢复可见后继续')
+    runtime.unmount()
+  } finally {
+    globalThis.setTimeout = realSetTimeout
+    globalThis.clearTimeout = realClearTimeout
+    if (previousDocument === undefined) delete globalThis.document
+    else globalThis.document = previousDocument
   }
 })
 

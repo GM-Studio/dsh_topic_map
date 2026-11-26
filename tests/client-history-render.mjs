@@ -74,13 +74,19 @@ function setupRuntime(options) {
     setItem(key, value) { memory.set(key, String(value)) },
     removeItem(key) { memory.delete(key) },
   }
+  const docListeners = {}
   const document = {
+    visibilityState: 'visible',
     documentElement: { setAttribute() {} },
     querySelector() { return null },
     querySelectorAll() { return [] },
     body: { appendChild() {} },
-    addEventListener() {},
-    removeEventListener() {},
+    addEventListener(type, fn) { (docListeners[type] = docListeners[type] || []).push(fn) },
+    removeEventListener(type, fn) {
+      const list = docListeners[type] || []
+      const at = list.indexOf(fn)
+      if (at >= 0) list.splice(at, 1)
+    },
   }
   const window = {
     innerWidth: 1400, innerHeight: 900,
@@ -90,7 +96,12 @@ function setupRuntime(options) {
   }
   const fake = makeFetch(({ action, body }) => {
     if (action === 'workspaces') {
-      return { value: [opts.workspace || { id: 'ws-1', title: 'demo', path: '/tmp/demo', sessionIds: ['s1'] }] }
+      return {
+        value: [
+          opts.workspace || { id: 'ws-1', title: 'demo', path: '/tmp/demo', sessionIds: ['s1'] },
+          { id: 'ws-2', title: 'two', path: '/tmp/two', sessionIds: ['s2'] },
+        ],
+      }
     }
     if (action === 'categories') {
       return { value: { store: CATEGORY_STORE, tree: [], lockedSessions: {} } }
@@ -130,7 +141,7 @@ function setupRuntime(options) {
     globalThis.AbortController, setTimeout, clearTimeout, null)
   runtime.component = exported.__historyTabBody
   runtime.props = { sessionId: 's1', hideTabStrip: true }
-  return { runtime, fake, memory, diag: () => exported.__historyDiag() }
+  return { runtime, fake, memory, doc: document, docListeners, diag: () => exported.__historyDiag() }
 }
 
 async function mountHistory(options) {
@@ -277,17 +288,13 @@ await test('切会话/工作区：categoryId 重置为「全部」，新请求�
   scene.runtime.unmount()
 })
 
-await test('分类结果在时间线视图下同样可达，分页重置', async () => {
-  const scene = await mountHistory()
-  const pill = byClass(scene.runtime.tree, 'dsh_tm_histcatpill')
-    .find(node => node.props['data-cat-id'] === 'c-reader')
-  click(pill)
-  await scene.runtime.settle()
-  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length, 0)
-  click(byData(scene.runtime.tree, 'data-view', 'timeline')[0])
-  await scene.runtime.settle()
-  assert.ok(byClass(scene.runtime.tree, 'dsh_tm_cluerow').length > 0, '分类结果也应是轮次/时间线')
-  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length, 0)
+await test('时间线关闭：无切换控件、无 clue 节点；旧 localStorage timeline 仍走列表', async () => {
+  assert.ok(src.includes('HISTORY_TIMELINE_ENABLED = false'))
+  const scene = await mountHistory({ memory: { 'dsh.tm.history.view.ws-1': 'timeline' } })
+  assert.equal(byData(scene.runtime.tree, 'data-view', 'timeline').length, 0)
+  assert.equal(byData(scene.runtime.tree, 'data-view', 'list').length, 0)
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_cluerow').length, 0)
+  assert.ok(byClass(scene.runtime.tree, 'dsh_tm_histrow').length > 0, '仍按列表渲染')
   scene.runtime.unmount()
 })
 
@@ -330,6 +337,68 @@ await test('切分类重置页码到 1，底栏与结果区是兄弟结构', asy
   assert.ok(footer !== undefined)
   assert.ok(src.includes("h('div', { className: 'dsh_tm_histbody'"))
   assert.ok(src.includes("h('div', { className: 'dsh_tm_histfoot', 'data-footer': 'pager' }"))
+  scene.runtime.unmount()
+})
+
+function fireDoc(scene, type, event) {
+  const list = scene.docListeners[type] || []
+  for (const fn of list) fn({ preventDefault() {}, stopPropagation() {}, ...event })
+}
+
+await test('点击行选中：同一时刻只一行，外部点击/Esc/翻页清空', async () => {
+  const scene = await mountHistory()
+  const rows = () => byClass(scene.runtime.tree, 'dsh_tm_histrow')
+  click(rows()[0])
+  await scene.runtime.settle()
+  assert.equal(rows()[0].props['data-selected'], '1')
+  assert.ok(String(rows()[0].props.className).includes('dsh_tm_histrow_selected'))
+  click(rows()[1])
+  await scene.runtime.settle()
+  assert.equal(rows()[0].props['data-selected'], undefined)
+  assert.equal(rows()[1].props['data-selected'], '1')
+
+  fireDoc(scene, 'pointerdown', { target: { closest: () => null } })
+  await scene.runtime.settle()
+  assert.equal(rows().filter(row => row.props['data-selected'] === '1').length, 0)
+
+  click(rows()[0])
+  await scene.runtime.settle()
+  fireDoc(scene, 'pointerdown', { target: { closest: selector => selector === '.dsh_tm_histrowwrap' ? {} : null } })
+  await scene.runtime.settle()
+  assert.equal(rows()[0].props['data-selected'], '1', '行内按钮不取消选中')
+
+  fireDoc(scene, 'keydown', { key: 'Escape' })
+  await scene.runtime.settle()
+  assert.equal(rows().filter(row => row.props['data-selected'] === '1').length, 0)
+
+  click(rows()[0])
+  await scene.runtime.settle()
+  click(byData(scene.runtime.tree, 'data-action', 'page-next')[0])
+  await scene.runtime.settle()
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrow').filter(row => row.props['data-selected'] === '1').length, 0)
+  scene.runtime.unmount()
+})
+
+await test('Tab 聚焦行即选中；Esc 清选中不清搜索词', async () => {
+  const scene = await mountHistory()
+  const input = byClass(scene.runtime.tree, 'dsh_tm_history_search')[0]
+  change(input, '索引')
+  input.props.onKeyDown({ key: 'Enter', preventDefault() {} })
+  await scene.runtime.settle()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await scene.runtime.settle()
+  const row = byClass(scene.runtime.tree, 'dsh_tm_histrow')[0]
+  row.props.onFocus({})
+  await scene.runtime.settle()
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrow')[0].props['data-selected'], '1')
+  const inputAfterFocus = byClass(scene.runtime.tree, 'dsh_tm_history_search')[0]
+  inputAfterFocus.props.onKeyDown({ key: 'ArrowDown', preventDefault() {} })
+  await scene.runtime.settle()
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrow')[1].props['data-selected'], '1', '方向键移动选中')
+  fireDoc(scene, 'keydown', { key: 'Escape' })
+  await scene.runtime.settle()
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrow').filter(row => row.props['data-selected'] === '1').length, 0)
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_history_search')[0].props.value, '索引', 'Esc 只清选中')
   scene.runtime.unmount()
 })
 

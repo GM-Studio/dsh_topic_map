@@ -79,15 +79,16 @@ await test('请求：全部/分类都是空关键词 /search，offset/limit 与�
   assert.equal(src.includes('当前会话最近轮次'), false)
 })
 
-await test('分支顺序：idle → error → 时间线 → 检索行；无会话清单分支', () => {
+await test('分支顺序：idle → error → 时间线（开关关闭不可达）→ 检索行', () => {
   const start = src.indexOf('var bodyChildren = []')
   const end = src.indexOf('// 底部状态条', start)
   const body = src.slice(start, end)
   const idle = body.indexOf('historyIdleGuide')
   const error = body.indexOf("result.status === 'error'")
-  const timeline = body.indexOf('viewMode === HISTORY_TIMELINE_VIEW')
+  const timeline = body.indexOf('HISTORY_TIMELINE_ENABLED && viewMode === HISTORY_TIMELINE_VIEW')
   const rows = body.indexOf('} else if (rows.length > 0)')
   assert.ok(idle >= 0 && error > idle && timeline > error && rows > timeline)
+  assert.ok(src.includes('HISTORY_TIMELINE_ENABLED = false'))
   assert.equal(body.includes('categoryBrowse'), false)
   assert.equal(body.includes('histcatsession'), false)
 })
@@ -108,15 +109,15 @@ await test('底部固定栏：列表与底栏兄弟节点，容器/结果区/底
   assert.ok(src.includes("'共 ' + pageTotal + ' 条"))
 })
 
-await test('切关键词/分类/视图/清空都会回第 1 页', () => {
-  assert.ok(src.includes("setPage(0)\n                      setQuery(next)"))
+await test('切关键词/分类/清空都会回第 1 页并清选中', () => {
+  const input = src.slice(src.indexOf("className: 'dsh_tm_history_search'"), src.indexOf("className: 'dsh_tm_history_search'") + 1200)
+  assert.ok(input.includes('setPage(0)'))
+  assert.ok(input.includes('setSelected(-1)'))
   assert.ok(src.includes("event.key === 'Escape'"))
-  const esc = src.slice(src.indexOf("event.key === 'Escape'"), src.indexOf("event.key === 'Escape'") + 180)
-  assert.ok(esc.includes('setPage(0)'))
-  const choose = src.slice(src.indexOf('function chooseHistoryCategory'), src.indexOf('function chooseHistoryCategory') + 400)
+  const choose = src.slice(src.indexOf('function chooseHistoryCategory'), src.indexOf('function chooseHistoryCategory') + 450)
   assert.ok(choose.includes('setPage(0)'))
-  const view = src.slice(src.indexOf('function switchHistoryView'), src.indexOf('function switchHistoryView') + 300)
-  assert.ok(view.includes('setPage(0)'))
+  assert.ok(choose.includes('setSelected(-1)'))
+  assert.equal(src.includes('switchHistoryView'), false, '时间线关闭后不再有视图切换')
 })
 
 await test('store 未就绪不重置分类；只有 store 已加载且确实缺失才回「全部」', () => {

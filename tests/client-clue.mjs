@@ -247,32 +247,10 @@ await test('历史页时间线：空命中显示「没有匹配的轮次」', as
   assert.equal(textOf(byClass(runtime.tree, 'dsh_tm_history_empty')[0]), '没有匹配的轮次')
 })
 
-await test('历史视图记忆：按工作区读写，坏值回列表', async () => {
-  const memory = new Map()
-  const previous = globalThis.localStorage
-  globalThis.localStorage = {
-    getItem(key) { return memory.has(key) ? memory.get(key) : null },
-    setItem(key, value) { memory.set(key, String(value)) },
-  }
-  try {
-    const built = new Function(
-      'HISTORY_VIEW_PREFIX', 'HISTORY_LIST_VIEW', 'HISTORY_TIMELINE_VIEW',
-      `${extractFunction(src, 'historyViewKey')}
-       ${extractFunction(src, 'readHistoryView')}
-       ${extractFunction(src, 'saveHistoryView')}
-       return { key: historyViewKey, read: readHistoryView, save: saveHistoryView }`,
-    )('dsh.tm.history.view.', 'list', 'timeline')
-    assert.equal(built.key('ws-1'), 'dsh.tm.history.view.ws-1')
-    assert.equal(built.read('ws-1'), 'list', '未写过默认列表')
-    built.save('ws-1', 'timeline')
-    assert.equal(memory.get('dsh.tm.history.view.ws-1'), 'timeline')
-    assert.equal(built.read('ws-1'), 'timeline')
-    memory.set('dsh.tm.history.view.ws-2', 'garbage')
-    assert.equal(built.read('ws-2'), 'list', '坏值不信任')
-  } finally {
-    if (previous === undefined) delete globalThis.localStorage
-    else globalThis.localStorage = previous
-  }
+await test('时间线已锁定关闭：不再读/写历史视图键', () => {
+  assert.ok(src.includes('var HISTORY_TIMELINE_ENABLED = false'))
+  assert.equal(src.includes('historyViewKey'), false)
+  assert.equal(src.includes('dsh.tm.history.view.'), false)
 })
 
 await test('分类:名称 前缀：唯一命中 / 多候选 / 无候选 / 尾随关键词', async () => {

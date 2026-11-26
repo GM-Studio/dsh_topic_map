@@ -87,7 +87,17 @@ await test('/categories：空 store 返回 version 1、空分类与空树', asyn
   await withTempHome(async () => {
     const result = await readCategoryIndex(CTX, { workspaceId: WS })
     assert.equal(result.ok, true, result.error)
-    assert.deepEqual(result.value, { version: 1, categories: [], assignments: {}, tree: [] })
+    assert.deepEqual(
+      {
+        version: result.value.version,
+        categories: result.value.categories,
+        assignments: result.value.assignments,
+        tree: result.value.tree,
+      },
+      { version: 1, categories: [], assignments: {}, tree: [] },
+    )
+    // 嵌套 `store` 是客户端实际读取的字段，必须存在且一致。
+    assert.deepEqual(result.value.store.categories, [])
     assert.deepEqual(result.value.tree, [])
   })
 })

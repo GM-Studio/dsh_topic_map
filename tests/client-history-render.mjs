@@ -99,7 +99,7 @@ function setupRuntime(options) {
     if (action === 'search') {
       const offset = Number(body.offset) || 0
       const limit = Number(body.limit) || 10
-      const total = 25
+      const total = body.categoryId === 'c-reader' ? 1 : 25
       const hits = []
       for (let i = offset; i < Math.min(total, offset + limit); i += 1) hits.push(hit(i + 1))
       return {
@@ -141,36 +141,44 @@ function searchCalls(scene) {
   return scene.fake.calls.filter(call => call.action === 'search')
 }
 
-await test('初始「全部」：所有会话列表，不出现最近轮次，也不请求 /search', async () => {
+await test('初始「全部」：/search 空关键词、无 categoryId，渲染轮次行', async () => {
   const scene = await mountHistory()
   assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrecenthead').length, 0)
   assert.equal(textOf(scene.runtime.tree).includes('当前会话最近轮次'), false)
-  const rows = byClass(scene.runtime.tree, 'dsh_tm_histcatsession')
+  const rows = byClass(scene.runtime.tree, 'dsh_tm_histrow')
   assert.equal(rows.length, 10, '默认每页 10 条')
-  assert.ok(textOf(scene.runtime.tree).includes('共 25 个会话'))
-  assert.equal(searchCalls(scene).length, 0, '全部模式不该请求 /search')
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length, 0, '不再渲染会话清单')
+  assert.ok(textOf(scene.runtime.tree).includes('共 25 条'))
+  const request = searchCalls(scene)[0]
+  assert.equal(request.body.keywords, '')
+  assert.equal(Object.prototype.hasOwnProperty.call(request.body, 'categoryId'), false)
+  assert.deepEqual({ offset: request.body.offset, limit: request.body.limit }, { offset: 0, limit: 10 })
   const diag = scene.diag()
-  assert.equal(diag.branch, 'category-browse')
-  assert.equal(diag.plan.idle, true)
-  assert.equal(diag.browse.total, 25)
+  assert.equal(diag.branch, 'rows')
+  assert.equal(diag.plan.idle, false)
+  assert.equal(diag.result.total, 25)
   scene.runtime.unmount()
 })
 
-await test('顶级胶囊包含孙类会话；「全部」恢复所有会话', async () => {
+await test('分类选中：/search 带 categoryId + 空关键词，行与关键词检索同 class', async () => {
   const scene = await mountHistory()
   const pill = byClass(scene.runtime.tree, 'dsh_tm_histcatpill')
     .find(node => node.props['data-cat-id'] === 'c-reader')
   click(pill)
   await scene.runtime.settle()
-  const one = byClass(scene.runtime.tree, 'dsh_tm_histcatsession')
-  assert.equal(one.length, 1, '挂在孙类 c-grand 的会话要算到顶级 c-reader')
-  assert.ok(textOf(one[0]).includes('会话 1'))
+  const request = searchCalls(scene).at(-1)
+  assert.equal(request.body.keywords, '', '分类浏览是空关键词')
+  assert.equal(request.body.categoryId, 'c-reader')
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrow').length, 1)
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length, 0)
+  assert.ok(textOf(scene.runtime.tree).includes('共 1 条'))
   const all = byClass(scene.runtime.tree, 'dsh_tm_histcatpill')
     .find(node => node.props['data-cat-id'] === '__all__')
   click(all)
   await scene.runtime.settle()
-  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length, 10)
-  assert.equal(scene.diag().browse.total, 25)
+  const allRequest = searchCalls(scene).at(-1)
+  assert.equal(Object.prototype.hasOwnProperty.call(allRequest.body, 'categoryId'), false)
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrow').length, 10)
   scene.runtime.unmount()
 })
 
@@ -191,7 +199,8 @@ await test('闪烁：分类结果 → 点全部，在 effect 前 renderOnce 已�
   click(all)
   scene.runtime.renderOnce()
   assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrow').length, 0, '不能画一帧旧检索行')
-  assert.ok(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length > 0, '直接进入全部会话列表')
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length, 0, '不能再走会话清单')
+  assert.ok(textOf(scene.runtime.tree).includes('输入关键词检索，或从左侧选择分类'))
   scene.runtime.unmount()
 })
 
@@ -207,7 +216,10 @@ await test('清空输入：effect 前这一帧直接回全部会话', async () =
   change(byClass(scene.runtime.tree, 'dsh_tm_history_search')[0], '')
   scene.runtime.renderOnce()
   assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrow').length, 0)
-  assert.ok(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length > 0)
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length, 0)
+  await scene.runtime.runEffects()
+  await scene.runtime.settle()
+  assert.ok(byClass(scene.runtime.tree, 'dsh_tm_histrow').length > 0, '清空后应重新检索全部轮次')
   scene.runtime.unmount()
 })
 
@@ -224,33 +236,35 @@ await test('Esc 清空：effect 前这一帧直接回全部会话', async () => 
     .props.onKeyDown({ key: 'Escape', preventDefault() {} })
   scene.runtime.renderOnce()
   assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrow').length, 0)
-  assert.ok(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length > 0)
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length, 0)
+  await scene.runtime.runEffects()
+  await scene.runtime.settle()
+  assert.ok(byClass(scene.runtime.tree, 'dsh_tm_histrow').length > 0, 'Esc 后应重新检索全部轮次')
   scene.runtime.unmount()
 })
 
-await test('分类会话列表在时间线视图下仍可达，分页重置', async () => {
+await test('分类结果在时间线视图下同样可达，分页重置', async () => {
   const scene = await mountHistory()
   const pill = byClass(scene.runtime.tree, 'dsh_tm_histcatpill')
     .find(node => node.props['data-cat-id'] === 'c-reader')
   click(pill)
   await scene.runtime.settle()
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length, 0)
   click(byData(scene.runtime.tree, 'data-view', 'timeline')[0])
   await scene.runtime.settle()
-  assert.ok(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length > 0, '分类会话列表必须可见')
-  assert.ok(textOf(scene.runtime.tree).includes('该分类 1 个会话'))
-  assert.equal(scene.diag().branch, 'category-browse')
-  assert.equal(scene.diag().browse.total, 1)
+  assert.ok(byClass(scene.runtime.tree, 'dsh_tm_cluerow').length > 0, '分类结果也应是轮次/时间线')
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length, 0)
   scene.runtime.unmount()
 })
 
 await test('pageSize 按工作区读取：15 条/页即时改变行数与页数', async () => {
   const scene = await mountHistory({ memory: { 'dsh.tm.history.pageSize.ws-1': '15' } })
-  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length, 15)
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrow').length, 15)
   assert.equal(textOf(byClass(scene.runtime.tree, 'dsh_tm_histpagenum')[0]), '第 1 / 2 页')
   scene.runtime.unmount()
 })
 
-await test('分页：第 1/2/3 页、最后一页禁用下一页，全部会话客户端分页', async () => {
+await test('分页：第 1/2/3 页、最后一页禁用下一页，offset 正确', async () => {
   const scene = await mountHistory()
   const pageLabel = () => textOf(byClass(scene.runtime.tree, 'dsh_tm_histpagenum')[0])
   assert.equal(pageLabel(), '第 1 / 3 页')
@@ -258,14 +272,13 @@ await test('分页：第 1/2/3 页、最后一页禁用下一页，全部会话�
   click(next())
   await scene.runtime.settle()
   assert.equal(pageLabel(), '第 2 / 3 页')
-  const secondPage = byClass(scene.runtime.tree, 'dsh_tm_histcatsession')
-  assert.equal(secondPage.length, 10)
-  assert.ok(textOf(secondPage[0]).includes('会话 11'), '第 2 页从第 11 条开始')
-  assert.equal(searchCalls(scene).length, 0, '全部模式切换页码不请求 /search')
+  assert.equal(searchCalls(scene).at(-1).body.offset, 10)
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrow').length, 10)
   click(next())
   await scene.runtime.settle()
   assert.equal(pageLabel(), '第 3 / 3 页')
-  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length, 5)
+  assert.equal(searchCalls(scene).at(-1).body.offset, 20)
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrow').length, 5)
   assert.equal(next().props.disabled, true, '最后一页禁用下一页')
   scene.runtime.unmount()
 })

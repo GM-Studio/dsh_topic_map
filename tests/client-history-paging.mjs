@@ -30,17 +30,20 @@ const savePageSize = new Function(
   `${extractFunction(src, 'historyPageSizeKey')};${extractFunction(src, 'saveHistoryPageSize')};return saveHistoryPageSize`,
 )
 
-const IDLE_PLAN = { idle: true, keywords: '', categoryId: '', prefix: { active: false, candidates: [] } }
-const OLD_READY = { status: 'ready', recent: false, hits: [{ sessionId: 's1', turn: 3 }], total: 1 }
+const ALL_PLAN = { idle: false, keywords: '', categoryId: '', prefix: { active: false, candidates: [] } }
+const OLD_CATEGORY = {
+  status: 'ready', query: '索引', categoryId: 'c-reader',
+  hits: [{ sessionId: 's1', turn: 3 }], total: 1,
+}
 
-await test('闪烁守卫：plan.idle + 旧分类结果 → 立即引导，不画旧行', () => {
-  assert.equal(idleGuide(OLD_READY, IDLE_PLAN, false), true)
-  assert.equal(idleGuide({ status: 'idle' }, IDLE_PLAN, false), true)
+await test('闪烁守卫：结果模式与计划不一致时立即引导，不画旧行', () => {
+  assert.equal(idleGuide(OLD_CATEGORY, ALL_PLAN), true)
+  assert.equal(idleGuide({ status: 'idle' }, ALL_PLAN), true)
 })
 
-await test('分类浏览（含「全部」）不被 idle 守卫误伤', () => {
-  assert.equal(idleGuide({ status: 'idle' }, { idle: true }, true), false, '全部/分类浏览有自己的会话列表')
-  assert.equal(idleGuide(OLD_READY, IDLE_PLAN, false), true)
+await test('全部/分类的新结果与计划一致后不再引导', () => {
+  assert.equal(idleGuide({ status: 'loading', query: '', categoryId: '' }, ALL_PLAN), false)
+  assert.equal(idleGuide({ status: 'ready', query: '', categoryId: '' }, ALL_PLAN), false)
 })
 
 await test('分页页数：0 条也至少 1 页，137/10 = 14 页', () => {
@@ -67,26 +70,26 @@ await test('pageSize 按工作区记忆：只接受 10/15/20，坏值回 10', ()
   assert.equal(save('ws-2', 99), 10, '非法值回落默认')
 })
 
-await test('请求：关键词检索带 offset/limit；无关键词与分类浏览不发 /search', () => {
+await test('请求：全部/分类都是空关键词 /search，offset/limit 与检索一致', () => {
   assert.ok(src.includes('offset: page * pageSize'))
   assert.ok(src.includes('limit: pageSize'))
+  assert.ok(src.includes("if (filter !== '') body.categoryId = filter"))
   assert.equal(src.includes('body.sessionIds = boundSessionId'), false)
   assert.equal(src.includes("body.sort = 'time'"), false)
-  assert.equal(src.includes("startHistorySearch(plan, { recent: true, clear: true })"), false)
   assert.equal(src.includes('当前会话最近轮次'), false)
-  assert.ok(src.includes("if (plan.keywords === '')"))
 })
 
-await test('分支顺序：idle → error → 分类会话列表 → 时间线 → 检索行', () => {
+await test('分支顺序：idle → error → 时间线 → 检索行；无会话清单分支', () => {
   const start = src.indexOf('var bodyChildren = []')
   const end = src.indexOf('// 底部状态条', start)
   const body = src.slice(start, end)
   const idle = body.indexOf('historyIdleGuide')
   const error = body.indexOf("result.status === 'error'")
-  const category = body.indexOf('} else if (categoryBrowse)')
   const timeline = body.indexOf('viewMode === HISTORY_TIMELINE_VIEW')
   const rows = body.indexOf('} else if (rows.length > 0)')
-  assert.ok(idle >= 0 && error > idle && category > error && timeline > category && rows > timeline)
+  assert.ok(idle >= 0 && error > idle && timeline > error && rows > timeline)
+  assert.equal(body.includes('categoryBrowse'), false)
+  assert.equal(body.includes('histcatsession'), false)
 })
 
 await test('底部固定栏：列表与底栏兄弟节点，容器/结果区/底栏三段 flex 高度链', () => {
@@ -102,7 +105,6 @@ await test('底部固定栏：列表与底栏兄弟节点，容器/结果区/底
   assert.ok(src.includes("'data-action': 'page-prev'"))
   assert.ok(src.includes("'data-action': 'page-next'"))
   assert.ok(src.includes("'第 ' + (page + 1) + ' / ' + pageCount + ' 页'"))
-  assert.ok(src.includes("'该分类 ' + pageTotal + ' 个会话'"))
   assert.ok(src.includes("'共 ' + pageTotal + ' 条"))
 })
 

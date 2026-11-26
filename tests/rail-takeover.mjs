@@ -1232,6 +1232,46 @@ await test('⋯ → 复制轨道诊断：JSON 含量测字段并 toast', async (
   dispose()
 })
 
+await test('诊断 JSON 增加 topRight 栈：3 个元素、字段齐全、dsh_tm_ 判 culprit=ours', async () => {
+  const copied = []
+  const clipboard = { clipboard: { writeText(text) { copied.push(text); return Promise.resolve() } } }
+  const scene = buildScene()
+  scene.doc.elementsFromPoint = (x, y) => {
+    assert.equal(x, 1256, '窗口宽 1280，右上角取 innerWidth-24')
+    assert.equal(y, 24)
+    return [
+      { tagName: 'DIV', className: 'host-shadow', id: 'host', getBoundingClientRect: () => ({ x: 1, y: 2, width: 3, height: 4 }), hasAttribute: () => false },
+      { tagName: 'ASIDE', className: 'dsh_tm_rail foo', id: '', getBoundingClientRect: () => ({ x: 10, y: 20, width: 30, height: 40 }), hasAttribute: () => true },
+      { tagName: 'BUTTON', className: 'plain', id: 'btn', getBoundingClientRect: () => ({ x: 5, y: 6, width: 7, height: 8 }), hasAttribute: () => false },
+    ]
+  }
+  const { RAILTAKE, dispose } = makeTakeover(scene.doc, {
+    loadOutline: () => Promise.resolve(OUTLINE), navigator: clipboard,
+  })
+  await flush()
+  const rail = railOf(scene.doc)
+  rail.querySelector('.dsh_tm_railmore').dispatchEvent({ type: 'click' })
+  const item = rail.querySelectorAll('.dsh_tm_railmenuitem')
+    .find(node => node.querySelector('.dsh_tm_railmenutext').textContent === '复制轨道诊断')
+  item.dispatchEvent({ type: 'click' })
+  await flush()
+  const diag = JSON.parse(copied[0])
+  assert.equal(diag.topRight.length, 3)
+  assert.deepEqual(Object.keys(diag.topRight[1]).sort(), ['bg', 'cls', 'id', 'opacity', 'owner', 'pos', 'rect', 'shadow', 'tag', 'z'])
+  assert.equal(diag.topRight[1].tag, 'aside')
+  assert.equal(diag.topRight[1].cls, 'dsh_tm_rail foo')
+  assert.deepEqual(diag.topRight[1].rect, { x: 10, y: 20, w: 30, h: 40 })
+  assert.equal(diag.culprit, 'ours')
+  dispose()
+})
+
+await test('topRightCulprit：没有 dsh_tm_ class 时判 host-or-other', () => {
+  const culprit = new Function(`${extractFunction(src, 'topRightCulprit')};return topRightCulprit`)()
+  assert.equal(culprit([{ cls: 'host shadow' }, { cls: 'dsh_tm_native' }]), 'ours')
+  assert.equal(culprit([{ cls: 'host shadow' }, { cls: 'other' }]), 'host-or-other')
+  assert.equal(culprit([]), 'host-or-other')
+})
+
 await test('原生模式：右缘药丸存在，点击写 native=0 并立即接管', async () => {
   const scene = buildScene()
   const store = makeStore({ 'dsh.tm.rail.native': '1' })
@@ -1339,6 +1379,17 @@ await test('dispose：撤掉自绘轨并把原生恢复（插件卸载/热重载
   assert.equal(railOf(scene.doc), null)
   assert.equal(scene.nav.style.visibility, '')
   assert.equal(scene.doc.getElementById('dsh_tm_rail_notice'), null)
+})
+
+// ── 8. 轨道/恢复药丸不再投影 ──────────────────────────────────────
+await test('轨道与恢复药丸的 CSS 不含 box-shadow（三档共用一条规则）', () => {
+  const rail = src.slice(src.indexOf("'.dsh_tm_rail{"), src.indexOf("'.dsh_tm_railmenu{"))
+  const restore = src.slice(src.indexOf("'.dsh_tm_railrestore{"), src.indexOf("'.dsh_tm_railrestore{") + 700)
+  assert.ok(rail.includes('box-shadow:none'), '轨道阴影必须为 none')
+  assert.equal(/box-shadow:(?!none)/.test(rail), false, '轨道规则里不能再有其它阴影')
+  assert.ok(restore.includes('box-shadow:none'), '恢复药丸也不投影')
+  assert.equal(/box-shadow:(?!none)/.test(restore), false)
+  assert.ok(src.includes('.dsh_tm_drawer{'), '抽屉阴影保留')
 })
 
 // ── 汇总 ───────────────────────────────────────────────────────────

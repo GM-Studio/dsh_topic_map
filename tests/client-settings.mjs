@@ -93,6 +93,9 @@ const SETTINGS_SOURCE = [
   extractFunction(src, 'railTierText'),
   extractFunction(src, 'settingsDefaultValues'),
   extractFunction(src, 'railPrefsSnapshot'),
+  extractFunction(src, 'historyPageSizeKey'),
+  extractFunction(src, 'readHistoryPageSize'),
+  extractFunction(src, 'saveHistoryPageSize'),
   extractFunction(src, 'formatIndexBytes'),
   extractFunction(src, 'indexStatsText'),
   extractFunction(src, 'indexStatsTitle'),
@@ -128,6 +131,7 @@ async function mountSettings(options) {
     [
       'SETTINGVIEW', 'RAILVIEW', 'RAILTAKE', 'RAIL_DEFAULT_WIDTH',
       'RAIL_TIER_MIN', 'RAIL_TIER_STD', 'RAIL_TIER_MAX', 'RIGHT_TABS',
+      'HISTORY_PAGE_SIZE_DEFAULT', 'HISTORY_PAGE_SIZE_OPTIONS', 'HISTORY_PAGE_SIZE_PREFIX',
       'SETTINGS_KIND', 'SETTINGS_TITLE', 'fetch', 'errorText', 'useTopicMapTheme',
       'currentWorkspaceId',
     ],
@@ -138,6 +142,7 @@ async function mountSettings(options) {
       200,
       'min', 'std', 'max',
       RIGHT_TABS,
+      10, [10, 15, 20], 'dsh.tm.history.pageSize.',
       'topic-map-settings',
       '设置',
       fake.fetch,
@@ -286,6 +291,28 @@ await test('rail 设置：设置页写的值进 localStorage，外部改值设�
   assert.equal(rail.store.get('dsh.tm.rail.tier.s1'), 'max')
   assert.equal(byData(runtime.tree, 'data-setting', 'railTier')
     .find(node => node.props['data-tier'] === 'max').props['aria-pressed'], 'true', '按钮与设置页同步')
+})
+
+await test('历史每页条数：10/15/20 三选一，默认 10，点击即时写入工作区键', async () => {
+  const memory = new Map()
+  const previous = globalThis.localStorage
+  globalThis.localStorage = {
+    getItem(key) { return memory.has(key) ? memory.get(key) : null },
+    setItem(key, value) { memory.set(key, String(value)) },
+  }
+  try {
+    const { runtime } = await mountSettings()
+    const buttons = byData(runtime.tree, 'data-setting', 'historyPageSize')
+    assert.deepEqual(buttons.map(textOf), ['10', '15', '20'])
+    assert.equal(buttons.find(node => node.props['data-size'] === '10').props['aria-pressed'], 'true')
+    click(buttons.find(node => node.props['data-size'] === '15'))
+    await runtime.settle()
+    assert.equal(byData(runtime.tree, 'data-setting', 'historyPageSize')
+      .find(node => node.props['data-size'] === '15').props['aria-pressed'], 'true')
+    assert.equal(memory.get('dsh.tm.history.pageSize.ws-1'), '15')
+  } finally {
+    globalThis.localStorage = previous
+  }
 })
 
 await test('索引体积失败（404/503）：显示 —，title 写 Host 原因', async () => {

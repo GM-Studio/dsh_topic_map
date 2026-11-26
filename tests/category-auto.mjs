@@ -27,30 +27,41 @@ import {
   applyCategorySuggestions,
   autoClassifySession,
   clearAutoClassifyDiagnostics,
+  flushAutoClassify,
   getAutoClassifyDiagnostics,
   mergeConfigPatch,
   overrideCategoryAssignment,
   readCategoryIndex,
   runStartupCategoryScan,
   saveCategory,
+  startCategoryAuto,
+  statusCategoryAuto,
 } from '../lib/index.js'
 import {
+  AUTO_START_MAX_SESSIONS,
   STARTUP_SCAN_LIMIT,
+  STARTUP_SCAN_WORKSPACE_QUOTA,
+  addAutoProcessedSessions,
   applyAutoClassification,
   applyMaintenanceSteps,
   buildMaintenancePrompt,
+  configureAutoClassify,
   createAutoClassifyQueue,
+  createAutoStartThrottle,
   createDailyMaintenanceGate,
   createDiagnosticsLog,
   createNewCategorySupport,
+  flushAutoClassifyQueue,
   isSessionLocked,
   isSessionUnclassified,
   listCategoryPaths,
   lockSession,
+  normalizeAutoClassifyState,
   normalizeLockedSessions,
   normalizeMaintenanceOps,
   planAutoSuggestion,
   planStartupScan,
+  planWorkspaceFairScan,
   resolveCategoryPath,
   runStartupScan,
   shouldTriggerDailyMaintenance,
@@ -72,26 +83,35 @@ async function test(name, fn) {
 const WS = 'ws-auto-1'
 const BASE_TIME = 1_700_000_000_000
 
-function makeRegistry(sessionIds = [], workspaceId = WS) {
-  return {
-    list: () => [{ id: workspaceId, path: 'E:\\auto-ws', title: '自动分类工作区', sessionIds }],
-  }
-}
-
-function makeCtx(options = {}) {
-  const sessions = options.sessions ?? []
+/**
+ * 多工作区假 ctx：`workspaces = { 'ws-a': ['s1'], 'ws-b': [...] }`。
+ *
+ * 启动扫描的公平分配与游标都按工作区维度工作，需要这个形状。
+ */
+function makeMultiCtx(workspaces = {}, options = {}) {
   const events = options.events ?? {}
   const titles = options.titles ?? {}
-  const workspaceId = options.workspaceId ?? WS
+  const allSessions = Object.values(workspaces).flat()
   return {
     get(name) {
-      if (name === 'workspaceRegistry') return makeRegistry(sessions, workspaceId)
+      if (name === 'workspaceRegistry') {
+        return {
+          list: () => Object.entries(workspaces).map(([id, sessionIds]) => ({
+            id,
+            path: `E:\\${id}`,
+            title: id,
+            sessionIds,
+          })),
+        }
+      }
       if (name === 'llm') return options.llm
       return undefined
     },
     sessionQuery: {
       async listSessions() {
-        return sessions.map(id => ({ header: { id, createdAt: BASE_TIME, origin: 'main', delegationDepth: 0 } }))
+        return allSessions.map(id => ({
+          header: { id, createdAt: BASE_TIME, origin: 'main', delegationDepth: 0 },
+        }))
       },
       async readTitleSnapshots(ids) {
         return ids.map(id => ({
@@ -106,10 +126,16 @@ function makeCtx(options = {}) {
     },
     sessionPersistence: {
       async stat() {
-        return { revision: 'rev-auto-1' }
+        return { revision: 'rev-auto-multi' }
       },
     },
   }
+}
+
+function makeCtx(options = {}) {
+  const sessions = options.sessions ?? []
+  const workspaceId = options.workspaceId ?? WS
+  return makeMultiCtx({ [workspaceId]: sessions }, options)
 }
 
 /** 一轮完整事件（request/header 供 resolveRoute 用）。 */
@@ -173,6 +199,19 @@ function storePath(home, workspaceId = WS) {
 
 function legacyPath(home, workspaceId = WS) {
   return join(home, 'topic-map', 'ui', `workspace-category-${workspaceId}.json`)
+}
+
+function autoStatePath(home) {
+  return join(home, 'topic-map', 'auto-classify-state.json')
+}
+
+async function writeConfig(home, config) {
+  await mkdir(join(home, 'topic-map'), { recursive: true })
+  await writeFile(join(home, 'topic-map', 'config.json'), JSON.stringify(config, null, 2), 'utf8')
+}
+
+async function readAutoState(home) {
+  return JSON.parse(await readFile(autoStatePath(home), 'utf8'))
 }
 
 async function writeRawStore(home, store, workspaceId = WS) {
@@ -539,7 +578,185 @@ await test('启动扫描（Host 接线）：无模型 → 返回 no-model 并记
   })
 })
 
-// ── 每日维护 ──────────────────────────────────────────────────────
+// ── 启动扫描：工作区公平分配 / 游标 ──────────────────────────────
+
+/** 造一个工作区分组：`count` 个会话，lastActive 依次递增。 */
+function makeScanGroup(workspaceId, count, base = BASE_TIME) {
+  return {
+    workspaceId,
+    sessions: Array.from({ length: count }, (_, index) => ({
+      sessionId: `${workspaceId}-s${String(index).padStart(2, '0')}`,
+      lastActive: base + index * 1000,
+    })),
+  }
+}
+
+await test('公平分配：4 个工作区各 4 个会话、上限 10 → 每区都拿到名额', () => {
+  const groups = ['ws-a', 'ws-b', 'ws-c', 'ws-d'].map(id => makeScanGroup(id, 4))
+  const planned = planWorkspaceFairScan(groups, { limit: 10, workspaceQuota: STARTUP_SCAN_WORKSPACE_QUOTA })
+  assert.equal(planned.selected.length, 10)
+  assert.equal(planned.total, 16)
+  assert.equal(planned.overflow, 6)
+  const counts = Object.fromEntries(planned.allocation.map(item => [item.workspaceId, item.count]))
+  assert.deepEqual(counts, { 'ws-a': 3, 'ws-b': 3, 'ws-c': 2, 'ws-d': 2 })
+  for (const item of planned.allocation) {
+    assert.ok(item.count > 0, `工作区 ${item.workspaceId} 不应被饿死`)
+  }
+  // 区内仍按 lastActive 倒序（最新在前）。
+  const aSelected = planned.selected.filter(item => item.workspaceId === 'ws-a').map(item => item.sessionId)
+  assert.deepEqual(aSelected, ['ws-a-s03', 'ws-a-s02', 'ws-a-s01'])
+})
+
+await test('公平分配：大工作区 44 个也吃不光名额，小工作区全部轮到', () => {
+  const groups = [
+    makeScanGroup('ws-big', 44, BASE_TIME + 1_000_000),
+    makeScanGroup('ws-small-1', 4),
+    makeScanGroup('ws-small-2', 6),
+    makeScanGroup('ws-small-3', 7),
+    makeScanGroup('ws-small-4', 3),
+  ]
+  const planned = planWorkspaceFairScan(groups, { limit: 60, workspaceQuota: 10 })
+  assert.equal(planned.selected.length, 60)
+  assert.equal(planned.overflow, 4)
+  const byWorkspace = new Map()
+  for (const item of planned.selected) {
+    byWorkspace.set(item.workspaceId, (byWorkspace.get(item.workspaceId) ?? 0) + 1)
+  }
+  // 4 个小工作区（共 20 个）必须一个不少地进入本轮。
+  assert.equal(byWorkspace.get('ws-small-1'), 4)
+  assert.equal(byWorkspace.get('ws-small-2'), 6)
+  assert.equal(byWorkspace.get('ws-small-3'), 7)
+  assert.equal(byWorkspace.get('ws-small-4'), 3)
+  assert.equal(byWorkspace.get('ws-big'), 40)
+})
+
+await test('启动扫描游标：已处理的跳过，新会话优先', async () => {
+  const sessions = {
+    wa: ['wa-p1', 'wa-p2', 'wa-n1', 'wa-n2'],
+    wb: ['wb-p1', 'wb-n1'],
+  }
+  /** p1/p2 是上次已处理；n* 是从没处理过的（其中 n 的 lastActive 更旧）。 */
+  const processed = new Set(['wa-p1', 'wa-p2', 'wb-p1'])
+  const enqueued = []
+  const deps = {
+    enabled: true,
+    isModelConfigured: () => true,
+    listWorkspaces: () => [{ id: 'wa' }, { id: 'wb' }],
+    collectSessions: workspaceId => sessions[workspaceId].map((sessionId, index) => ({
+      sessionId,
+      lastActive: BASE_TIME - index * 1000,
+    })),
+    readStore: () => baseStore(),
+    isProcessed: sessionId => processed.has(sessionId),
+    enqueue: sessionId => { enqueued.push(sessionId) },
+    log: () => {},
+    limit: 60,
+  }
+  const first = await runStartupScan(deps)
+  assert.deepEqual(enqueued.sort(), ['wa-n1', 'wa-n2', 'wb-n1'])
+  assert.equal(first.queued, 3)
+  assert.equal(enqueued.includes('wa-p1'), false, '已处理的会话不能再入队')
+  for (const sessionId of enqueued) processed.add(sessionId)
+
+  // 第二次启动：旧会话全部跳过；新增一个会话仍能被扫到。
+  sessions.wa.push('wa-n3')
+  enqueued.length = 0
+  const second = await runStartupScan(deps)
+  assert.deepEqual(enqueued, ['wa-n3'])
+  assert.equal(second.queued, 1)
+  enqueued.forEach(sessionId => processed.add(sessionId))
+
+  enqueued.length = 0
+  const third = await runStartupScan(deps)
+  assert.equal(third.queued, 0, '全部处理过之后本轮应收敛为 0')
+})
+
+await test('游标状态：形状固定、坏条目丢弃、按时间裁剪', () => {
+  assert.deepEqual(normalizeAutoClassifyState(null), { lastRunAt: null, processed: {} })
+  assert.deepEqual(normalizeAutoClassifyState({ lastRunAt: 5, processed: { a: 1, b: 'x', '': 2 } }), {
+    lastRunAt: 5,
+    processed: { a: 1 },
+  })
+  const next = addAutoProcessedSessions(
+    { lastRunAt: 1, processed: { old: 1 } },
+    ['a', 'b', { sessionId: 'c' }, { sessionId: '' }, ''],
+    { at: 100, max: 2 },
+  )
+  assert.equal(next.lastRunAt, 100)
+  assert.deepEqual(Object.keys(next.processed).sort(), ['a', 'b'])
+  assert.equal(next.processed.old, undefined, '超过上限时最旧的应被裁掉')
+  for (const value of Object.values(next.processed)) assert.equal(value, 100)
+})
+
+await test('按需触发节流：同工作区 10 分钟一次，不同工作区互不影响', () => {
+  let now = 1_000_000
+  const throttle = createAutoStartThrottle({ windowMs: 10 * 60 * 1000, now: () => now })
+  assert.deepEqual(throttle.claim('ws-1'), { allowed: true })
+  const blocked = throttle.claim('ws-1')
+  assert.equal(blocked.allowed, false)
+  assert.equal(blocked.retryAfterMs, 10 * 60 * 1000)
+  assert.deepEqual(throttle.claim('ws-2'), { allowed: true }, '另一个工作区不受影响')
+  now += 9 * 60 * 1000
+  assert.equal(throttle.claim('ws-1').allowed, false)
+  now += 1 * 60 * 1000
+  assert.deepEqual(throttle.claim('ws-1'), { allowed: true })
+})
+
+await test('队列 enqueueNow：跳过 60 秒防抖立即执行；pending 项被提升', async () => {
+  const timers = []
+  const runs = []
+  let nextId = 0
+  const schedule = (fn, ms) => {
+    const timer = { id: (nextId += 1), fn, ms, canceled: false }
+    timers.push(timer)
+    return timer
+  }
+  const cancel = timer => { if (timer !== null && timer !== undefined) timer.canceled = true }
+  const queue = createAutoClassifyQueue({
+    debounceMs: 60_000,
+    schedule,
+    cancel,
+    execute: async (ctx, sessionId) => { runs.push(sessionId) },
+  })
+  queue.enqueue({}, 's-promote')
+  assert.equal(queue.pendingCount(), 1)
+  assert.equal(queue.enqueueNow({}, 's-promote'), true)
+  assert.equal(timers[0].canceled, true, '提升时必须取消原防抖定时器')
+  await queue.flush()
+  assert.deepEqual(runs, ['s-promote'])
+  assert.equal(queue.stats().promoted, 1)
+
+  queue.enqueueNow({}, 's-now')
+  await queue.flush()
+  assert.deepEqual(runs, ['s-promote', 's-now'], '新会话不需要等定时器')
+})
+
+await test('启动扫描游标落盘：写 auto-classify-state.json，下次启动跳过', async () => {
+  await withTempHome(async home => {
+    const workspaceId = 'ws-auto-state'
+    const sessionIds = ['state-1', 'state-2', 'state-3']
+    const events = Object.fromEntries(sessionIds.map(id => [id, makeEvents()]))
+    const ctx = makeMultiCtx({ [workspaceId]: sessionIds }, { events })
+    await writeConfig(home, { provider: 'agent2api', model: 'DeepSeek-Flash' })
+    const queue = configureAutoClassify({ execute: async () => {}, debounceMs: 60_000 })
+    try {
+      const first = await runStartupCategoryScan(ctx)
+      assert.equal(first.queued, 3, JSON.stringify(first))
+      const state = await readAutoState(home)
+      assert.deepEqual(Object.keys(state).sort(), ['lastRunAt', 'processed'])
+      assert.ok(Number.isFinite(state.lastRunAt) && state.lastRunAt > 0)
+      assert.deepEqual(Object.keys(state.processed).sort(), sessionIds)
+
+      const second = await runStartupCategoryScan(ctx)
+      assert.equal(second.queued, 0, '已写进游标的会话不能再入队')
+      const after = await readAutoState(home)
+      assert.deepEqual(Object.keys(after.processed).sort(), sessionIds)
+    } finally {
+      queue.dispose()
+    }
+  })
+})
+
 
 await test('每日维护触发：未归类 >3 或候选主题 ≥3', () => {
   assert.equal(shouldTriggerDailyMaintenance({ unclassifiedCount: 0, themeSizes: [] }), false)
@@ -836,7 +1053,7 @@ await test('旧分类导入：文件损坏只记日志，不阻断 /categories',
 
 // ── HTTP 接线：override 与 deprecated ─────────────────────────────
 
-function registerHandler() {
+function registerHandler(workspaces = { [WS]: [] }, options = {}) {
   const registered = []
   const webScope = {
     get(name) {
@@ -850,11 +1067,9 @@ function registerHandler() {
     },
     effect(fn) { fn() },
   }
+  const base = makeMultiCtx(workspaces, options)
   const ctx = {
-    get(name) {
-      if (name === 'workspaceRegistry') return makeRegistry([])
-      return undefined
-    },
+    ...base,
     inject(names, callback) {
       if (names.includes('webServer')) callback(webScope)
     },
@@ -911,6 +1126,121 @@ await test('/categorize：保留但带 deprecated:true，并记一条诊断日�
     assert.equal(result.body.value.deprecated, true, '旧端点必须显式标 deprecated')
     const entries = getAutoClassifyDiagnostics(20)
     assert.ok(entries.some(entry => entry.kind === 'deprecated-endpoint'))
+  })
+})
+
+// ── 按需触发 / 状态端点 ──────────────────────────────────────────
+
+await test('/category-auto-start：立即入队未归类会话（≤20），10 分钟内再触发被节流', async () => {
+  await withTempHome(async () => {
+    const workspaceId = 'ws-auto-start'
+    const sessions = Array.from({ length: 25 }, (_, index) => `start-${index}`)
+    const events = Object.fromEntries(sessions.map(id => [id, makeEvents()]))
+    const ctx = makeMultiCtx({ [workspaceId]: sessions }, { events })
+    const queue = configureAutoClassify({ execute: async () => {}, debounceMs: 60_000 })
+    try {
+      const first = await startCategoryAuto(ctx, { workspaceId })
+      assert.equal(first.ok, true, first.error)
+      assert.equal(first.value.queued, AUTO_START_MAX_SESSIONS, '单次最多入队 20 个')
+      const second = await startCategoryAuto(ctx, { workspaceId })
+      assert.equal(second.ok, true, second.error)
+      assert.equal(second.value.throttled, true)
+      assert.equal(second.value.queued, 0)
+      assert.ok(second.value.retryAfterMs > 0 && second.value.retryAfterMs <= 10 * 60 * 1000)
+    } finally {
+      queue.dispose()
+    }
+  })
+})
+
+await test('/category-auto-status：categories / unclassified / running / lastRunAt / no-model', async () => {
+  await withTempHome(async home => {
+    const workspaceId = 'ws-auto-status'
+    const sessions = Array.from({ length: 25 }, (_, index) => `status-${index}`)
+    const events = Object.fromEntries(sessions.map(id => [id, makeEvents()]))
+    const ctx = makeMultiCtx({ [workspaceId]: sessions }, { events })
+    await writeRawStore(home, {
+      version: 1,
+      categories: [
+        { id: 'c-1', name: '甲', parentId: null, source: 'model' },
+        { id: 'c-2', name: '乙', parentId: null, source: 'model' },
+      ],
+      assignments: Object.fromEntries(sessions.slice(0, 20).map((sessionId, index) => [
+        sessionId,
+        { categoryId: index % 2 === 0 ? 'c-1' : 'c-2', source: 'model' },
+      ])),
+    }, workspaceId)
+    await mkdir(join(home, 'topic-map'), { recursive: true })
+    await writeFile(autoStatePath(home), JSON.stringify({
+      lastRunAt: 123456789,
+      processed: { 'status-0': 111 },
+    }), 'utf8')
+
+    const idle = await statusCategoryAuto(ctx, { workspaceId })
+    assert.equal(idle.ok, true, idle.error)
+    assert.deepEqual(idle.value, {
+      categories: 2,
+      unclassified: 5,
+      running: false,
+      queued: 0,
+      lastRunAt: 123456789,
+      model: 'no-model',
+    })
+
+    // 配好模型后状态应变成 ready。
+    await writeConfig(home, { provider: 'agent2api', model: 'DeepSeek-Flash' })
+    const ready = await statusCategoryAuto(ctx, { workspaceId })
+    assert.equal(ready.value.model, 'ready')
+
+    // 用一个阻塞队列验证「正在归类」状态。
+    let released = false
+    const waiters = []
+    const queue = configureAutoClassify({
+      debounceMs: 60_000,
+      execute: () => (released
+        ? Promise.resolve()
+        : new Promise(resolve => { waiters.push(resolve) })),
+    })
+    try {
+      const started = await startCategoryAuto(ctx, { workspaceId })
+      assert.equal(started.ok, true, started.error)
+      assert.equal(started.value.queued, 5)
+      const running = await statusCategoryAuto(ctx, { workspaceId })
+      assert.equal(running.value.running, true)
+      assert.equal(running.value.queued, 5)
+      assert.equal(running.value.lastRunAt, 123456789, '按需触发不写启动扫描游标')
+    } finally {
+      released = true
+      for (const resolve of waiters.splice(0)) resolve()
+      await flushAutoClassifyQueue()
+      queue.dispose()
+    }
+  })
+})
+
+await test('/category-auto-start 与 /category-auto-status 已接线', async () => {
+  await withTempHome(async () => {
+    const workspaceId = 'ws-auto-route'
+    const sessions = ['route-auto-1', 'route-auto-2']
+    const events = Object.fromEntries(sessions.map(id => [id, makeEvents()]))
+    const handler = registerHandler({ [workspaceId]: sessions }, { events })
+
+    const statusBefore = await callRoute(handler, 'category-auto-status', { workspaceId })
+    assert.equal(statusBefore.status, 200, JSON.stringify(statusBefore.body))
+    assert.equal(statusBefore.body.ok, true)
+    assert.equal(statusBefore.body.value.unclassified, 2)
+    assert.equal(statusBefore.body.value.model, 'no-model')
+    assert.equal(statusBefore.body.value.running, false)
+
+    const started = await callRoute(handler, 'category-auto-start', { workspaceId })
+    assert.equal(started.status, 200, JSON.stringify(started.body))
+    assert.equal(started.body.ok, true)
+    assert.equal(started.body.value.queued, 2)
+
+    const statusAfter = await callRoute(handler, 'category-auto-status', { workspaceId })
+    assert.equal(statusAfter.status, 200)
+    assert.equal(typeof statusAfter.body.value.queued, 'number')
+    await flushAutoClassify()
   })
 })
 

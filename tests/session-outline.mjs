@@ -38,7 +38,7 @@ function makeEvents(specs) {
   specs.forEach((spec, index) => {
     const start = BASE_TIME + index * 60_000
     const turn = spec.turn ?? index
-    push('turn/start', { turn }, start)
+    push('turn/start', { turn }, spec.noStartTime === true ? undefined : start)
     push('user/message', {
       content: [{ type: 'text', text: spec.prompt ?? `问题 ${turn}` }],
       source: { kind: 'user' },
@@ -50,7 +50,9 @@ function makeEvents(specs) {
         source: { kind: 'model', provider: 'agent2api', model: 'DeepSeek-Flash' },
       },
     }, start + 1000)
-    push('turn/end', { turn, reason: { kind: spec.endReason ?? 'completed' } }, start + 5000)
+    if (spec.open !== true) {
+      push('turn/end', { turn, reason: { kind: spec.endReason ?? 'completed' } }, start + 5000)
+    }
   })
   return events
 }
@@ -125,17 +127,44 @@ await test('正常：字段投影完整、不夹带全文、时间取 turn/end',
     turn: 0,
     promptHead: '第一轮的问题',
     time: BASE_TIME + 5000,
+    start: BASE_TIME,
     endReason: 'completed',
     endSeq: 3,
   })
   assert.equal(result.value.turns[1].turn, 1)
   assert.equal(result.value.turns[1].endReason, 'aborted')
   assert.equal(result.value.turns[1].time, BASE_TIME + 60_000 + 5000)
+  assert.equal(result.value.turns[1].start, BASE_TIME + 60_000)
   assert.equal(result.value.turns[1].endSeq, 7)
   for (const row of result.value.turns) {
+    assert.deepEqual(Object.keys(row).sort(), [
+      'endReason', 'endSeq', 'promptHead', 'start', 'time', 'turn',
+    ], '旧字段必须全部保留，只新增 start')
     assert.equal('prompt' in row, false, '大纲不能带提问全文')
     assert.equal('response' in row, false, '大纲不能带回答全文')
   }
+})
+
+await test('start 口径：已结束轮 time=end；未结束轮 time=start；缺 turn/start 时间时 start=null', async () => {
+  const ctx = makeCtx({
+    events: {
+      [SESSION]: makeEvents([
+        { prompt: '未结束的一轮', open: true },
+        { prompt: '没有开始时间的一轮', noStartTime: true },
+      ]),
+    },
+  })
+  const result = await readSessionOutline(ctx, { sessionId: SESSION })
+  assert.equal(result.ok, true, result.error)
+  const [openTurn, noStart] = result.value.turns
+  assert.equal(openTurn.start, BASE_TIME)
+  assert.equal(openTurn.time, BASE_TIME)
+  assert.equal(openTurn.time, openTurn.start, '未结束轮的 time 退回 start')
+  assert.equal(openTurn.endReason, 'open')
+  assert.equal(openTurn.endSeq, null)
+
+  assert.equal(noStart.start, null, 'turn/start 没时间时必须 null，不能用 0 冒充')
+  assert.equal(noStart.time, BASE_TIME + 60_000 + 5000, '有 end 时 time 仍 end 优先')
 })
 
 await test('边界：promptHead 压平换行且不超过 60 字', async () => {
@@ -180,6 +209,7 @@ await test('索引优先：索引可用时不再读日志', async () => {
     assert.equal(result.ok, true, result.error)
     assert.equal(result.value.turns.length, 2)
     assert.equal(result.value.turns[0].promptHead, '索引里的第一轮')
+    assert.equal(result.value.turns[0].start, BASE_TIME, '索引路径也必须带 start')
   })
 })
 

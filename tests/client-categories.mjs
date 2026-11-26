@@ -75,6 +75,7 @@ const COMPONENT_SOURCE = [
   extractFunction(src, 'categoryTreeNodes'),
   extractFunction(src, 'categoryCapsuleModel'),
   extractFunction(src, 'categorySessionLocked'),
+  extractFunction(src, 'categorySessionLockedBy'),
   extractFunction(src, 'categoryOverrideBody'),
   extractFunction(src, 'categoryErrorText'),
   extractFunction(src, 'sessionTimeInfoOf'),
@@ -88,7 +89,7 @@ async function mount(options = {}) {
   const store = options.store === undefined ? fixtureStore() : options.store
   const fake = makeFetch(({ action }) => {
     if (action === 'workspaces') return { value: [{ id: 'ws-1', sessionIds: SESSIONS.map(s => s.sessionId) }] }
-    if (action === 'categories') return { value: { store, tree: [] } }
+    if (action === 'categories') return { value: { store, tree: [], lockedSessions: options.lockedSessions || {} } }
     if (action === 'sessions') return { value: { workspace: { id: 'ws-1' }, sessions: SESSIONS, total: SESSIONS.length } }
     return { ok: false, error: 'unexpected ' + action }
   })
@@ -151,6 +152,14 @@ await test('子孙会话计入顶层胶囊；未归类只在有未归类会话�
   noRoot.runtime.unmount()
 })
 
+await test('lockedSessions 随 /categories 原样带给历史行', async () => {
+  const locked = await mount({ lockedSessions: { s9: { at: 1, by: 'user' } } })
+  await locked.runtime.settle()
+  const last = locked.data[locked.data.length - 1]
+  assert.deepEqual(last.lockedSessions, { s9: { at: 1, by: 'user' } })
+  locked.runtime.unmount()
+})
+
 await test('选中态与过滤参数：全部 → ""，未归类 → __none__，分类 → 分类 id', async () => {
   const selected = await mount({ selectedCategory: 'c-reader' })
   await selected.runtime.settle()
@@ -197,17 +206,27 @@ await test('归错了：只列已有分类 + 未归类；override 请求参数�
   const lockedFn = new Function(
     `${extractFunction(src, 'categoryStoreOf')};${extractFunction(src, 'categorySessionLocked')};return categorySessionLocked`,
   )()
+  const lockedByFn = new Function(
+    `${extractFunction(src, 'categoryStoreOf')};${extractFunction(src, 'categorySessionLocked')};${extractFunction(src, 'categorySessionLockedBy')};return categorySessionLockedBy`,
+  )()
   const bodyFn = new Function(
     `${extractFunction(src, 'categoryBodyOf')};${extractFunction(src, 'categoryOverrideBody')};return categoryOverrideBody`,
   )()
   const store = fixtureStore()
   assert.equal(lockedFn(store, 's2'), true, 'source=user 必须显示锁')
   assert.equal(lockedFn(store, 's1'), false)
+  assert.equal(lockedByFn(store, { s1: { at: 1, by: 'user' } }, 's1'), true, 'lockedSessions 存在即锁')
+  assert.equal(lockedByFn(store, {}, 's2'), true, 'source=user 也锁')
+  assert.equal(lockedByFn(store, {}, 's4'), false, '两者都没有不显示锁')
+  assert.equal(lockedByFn(store, { s2: { at: 1 } }, 's2'), true, 'lockedSessions 优先于模型 assignment')
   assert.deepEqual(bodyFn('ws-1', 's1', null), { workspaceId: 'ws-1', sessionId: 's1', categoryId: null })
   assert.deepEqual(bodyFn('ws-1', 's1', 'c-reader'), { workspaceId: 'ws-1', sessionId: 's1', categoryId: 'c-reader' })
 
   assert.ok(src.includes("'dsh_tm_histlock'"))
   assert.ok(src.includes('已人工指定，模型不会覆盖'))
+  assert.ok(src.includes('lockedSessionById(row.sessionId)'), '未归类列表也要走同一锁定判定')
+  assert.ok(src.includes('categorySessionLockedBy(categoryData.store, categoryData.lockedSessions'))
+  assert.ok(src.includes('lockedSessions[key] === true'), 'override 成功后的本地锁立即生效')
   assert.ok(src.includes("'归错了…'"))
   assert.ok(src.includes("'override-category'"))
   assert.ok(src.includes('已改为「'))

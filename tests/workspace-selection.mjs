@@ -28,26 +28,8 @@ test('工作区统计覆盖归类及未归类会话，去重且只使用本工�
   assert.equal(totals([category('未知', [{ sessionId: 'x', turns: null }])], [], null).turns, null)
 })
 
-function deferred() { let resolve; const promise = new Promise(r => { resolve = r }); return { promise, resolve } }
-async function flush() { for (let i = 0; i < 6; i++) await Promise.resolve() }
-
-test('快速 A→B 切换时，迟到的 A 分类和统计不能覆盖 B；加载时清除旧工作区', async () => {
-  const calls = []
-  const state = { tree: [category('旧', [{ sessionId: 'old', turns: 999 }])], total: 1, uncategorized: [] }
-  const post = (action, body) => { const d = deferred(); calls.push({ action, body, ...d }); return d.promise }
-  // TREE_CACHE / TTL 也要注入：loadWorkspaceTree 会用它们做前端缓存
-  const treeCache = new Map()
-  const load = new Function('post', 'patchTree', 'workspaceRequestRef', 'inferWorkspaceId', 'activeSessionId', 'TREE_CACHE', 'TREE_CACHE_TTL_MS',
-    extract('loadWorkspaceTree') + '; return loadWorkspaceTree')(post, patch => Object.assign(state, patch), { current: 0 }, () => 'a', 'live', treeCache, 60000)
-  load('a'); assert.deepEqual(state.tree, [])
-  calls[0].resolve([{ id: 'a' }, { id: 'b' }]); await flush()
-  const a = calls.find(c => c.action === 'categorize')
-  load('b'); calls.findLast(c => c.action === 'workspaces').resolve([{ id: 'a' }, { id: 'b' }]); await flush()
-  const b = calls.findLast(c => c.action === 'categorize')
-  b.resolve({ tree: [category('B', [{ sessionId: 'b1', turns: 8 }])], total: 1 }); await flush()
-  a.resolve({ tree: [category('A', [{ sessionId: 'a1', turns: 300 }])], total: 1 }); await flush()
-  assert.equal(state.workspaceId, 'b')
-  assert.equal(state.tree[0].name, 'B')
-  assert.equal(totals(state.tree, state.uncategorized, null).turns, 8)
-  assert.equal(b.body.activeSessionId, null, '显式切换工作区应刷新该工作区全部轮数')
+test('旧 /categorize 刷新链路已下线，不再消费 activeSessionId 归类结果', () => {
+  assert.equal(src.includes("'categorize'"), false)
+  assert.equal(src.includes('activeSessionId: null'), false)
 })
+

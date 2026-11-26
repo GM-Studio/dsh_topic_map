@@ -152,10 +152,10 @@ await test('零工作区时给出区分于"还没归类"的提示', () => {
   assert.ok(at > 0, '应能找到空态')
 })
 
-await test('零工作区时「归类」按钮置灰并说明', () => {
-  assert.ok(src.includes('还没有登记任何工作区，无法归类'), '应说明为什么点不了')
-  assert.ok(src.includes("disabled: sessionTree.busy || (sessionTree.workspaces ?? []).length === 0"),
-    '没有工作区时应禁用归类')
+await test('旧「归类」按钮已随 /categorize 下线', () => {
+  assert.equal(src.includes('还没有登记任何工作区，无法归类'), false)
+  assert.equal(src.includes('onClick: recategorize'), false)
+  assert.equal(src.includes("'categorize'"), false)
 })
 
 

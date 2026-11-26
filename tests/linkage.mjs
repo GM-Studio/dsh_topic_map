@@ -88,13 +88,10 @@ test('中间列表点条目会联动左栏', () => {
 })
 
 // ── 4. 数字一致：左栏轮数来自实时刷新 ──────────────────────────────
-test('前端始终请求全量刷新轮数（增量判断后只要 ~85ms）', () => {
-  // 早先只刷当前会话，导致左栏其它会话的数字一直是旧值。
-  // Host 侧改成按 revision 增量判断后，全量刷新从 3877ms 降到 85ms，
-  // 所以前端不再需要"只刷一个"的优化。
-  assert.ok(src.includes('activeSessionId: null'), '应请求全量刷新')
-  assert.equal(src.includes('activeSessionId: activeSessionId === undefined'), false,
-    '不应再按当前会话收窄刷新范围')
+test('旧话题地图面板入口与 /categorize 已下线', () => {
+  assert.equal(src.includes("'categorize'"), false, '客户端不能再请求已弃用的 /categorize')
+  assert.equal(src.includes("slots.inject('conversation.view'"), false, '旧面板入口不再注册')
+  assert.equal(src.includes('activeSessionId: null'), false, '不再消费归类树全量刷新')
 })
 
 const host = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')

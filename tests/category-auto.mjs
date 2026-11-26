@@ -32,6 +32,8 @@ import {
   mergeConfigPatch,
   overrideCategoryAssignment,
   readCategoryIndex,
+  resetCategoryWorkspace,
+  runDailyCategoryMaintenance,
   runStartupCategoryScan,
   saveCategory,
   startCategoryAuto,
@@ -62,6 +64,9 @@ import {
   planAutoSuggestion,
   planStartupScan,
   planWorkspaceFairScan,
+  purgeEmptyCategories,
+  removeAutoProcessedSessions,
+  resetModelCategories,
   resolveCategoryPath,
   runStartupScan,
   shouldTriggerDailyMaintenance,
@@ -879,6 +884,203 @@ await test('每日维护执行：合并 + 拆分只走 plan/apply，人工分类
   assert.equal(applied.store.assignments.s1.categoryId, child.id)
   assert.equal(applied.store.assignments.s2.categoryId, child.id)
   assert.equal(applied.store.assignments.s4.categoryId, 'c-user')
+})
+
+// ── 空分类清理 / 重新归类 ────────────────────────────────────────
+
+await test('空分类清理：自底向上删父子链，user 与锁定会话不删', () => {
+  const store = baseStore({
+    categories: [
+      { id: 'p-empty', name: '空父', parentId: null, source: 'model' },
+      { id: 'c-empty', name: '空子', parentId: 'p-empty', source: 'model' },
+      { id: 'g-empty', name: '空孙', parentId: 'c-empty', source: 'model' },
+      { id: 'p-keep', name: '有娃父', parentId: null, source: 'model' },
+      { id: 'c-sess', name: '有会话子', parentId: 'p-keep', source: 'model' },
+      { id: 'u-empty', name: '人工空', parentId: null, source: 'user' },
+      { id: 'u-model-child', name: '人工下模型空', parentId: 'u-empty', source: 'model' },
+      { id: 'p-locked', name: '锁父', parentId: null, source: 'model' },
+    ],
+    assignments: {
+      's-1': { categoryId: 'c-sess', source: 'model' },
+      's-lock': { categoryId: 'p-locked', source: 'user' },
+    },
+    lockedSessions: { 's-lock': { at: 1, by: 'user' } },
+  })
+  const result = purgeEmptyCategories(store)
+  assert.equal(result.count, 4)
+  assert.deepEqual(result.purged.map(item => item.id).sort(), ['c-empty', 'g-empty', 'p-empty', 'u-model-child'])
+  assert.deepEqual(result.store.categories.map(item => item.id).sort(), [
+    'c-sess', 'p-keep', 'p-locked', 'u-empty',
+  ])
+  assert.deepEqual(result.store.lockedSessions, { 's-lock': { at: 1, by: 'user' } })
+  assert.deepEqual(result.store.assignments, store.assignments)
+})
+
+await test('空分类清理：没有空分类时是无操作', () => {
+  const store = baseStore({
+    categories: [{ id: 'c-1', name: '有会话', parentId: null, source: 'model' }],
+    assignments: { s1: { categoryId: 'c-1', source: 'model' } },
+  })
+  const result = purgeEmptyCategories(store)
+  assert.equal(result.count, 0)
+  assert.deepEqual(result.purged, [])
+  assert.deepEqual(result.store.categories, store.categories)
+})
+
+await test('每日维护会清空分类并记 purged-empty-categories 日志（不依赖模型/触发条件）', async () => {
+  await withTempHome(async home => {
+    const workspaceId = 'ws-auto-purge'
+    const ctx = makeCtx({ sessions: [], workspaceId })
+    await writeRawStore(home, {
+      version: 1,
+      categories: [
+        { id: 'c-empty', name: '空模型分类', parentId: null, source: 'model' },
+        { id: 'c-user', name: '人工分类', parentId: null, source: 'user' },
+      ],
+      assignments: {},
+    }, workspaceId)
+    clearAutoClassifyDiagnostics()
+    const first = await runDailyCategoryMaintenance(ctx, workspaceId)
+    assert.equal(first.ran, false)
+    const raw = await readRawStore(home, workspaceId)
+    assert.deepEqual(raw.categories.map(item => item.name), ['人工分类'])
+    const purges = () => getAutoClassifyDiagnostics(50)
+      .filter(entry => entry.kind === 'maintenance-purge' && entry.workspaceId === workspaceId)
+    assert.equal(purges().length, 1)
+    assert.match(purges()[0].message, /^purged-empty-categories: 1$/)
+
+    // 同一天第二次活动不重复扫描，也不重复记日志。
+    await runDailyCategoryMaintenance(ctx, workspaceId)
+    assert.equal(purges().length, 1)
+  })
+})
+
+await test('重新归类：删模型分类与对应 assignments，保留 user / 锁定 / 人工归类', () => {
+  const store = baseStore({
+    categories: [
+      { id: 'm-plain', name: '模型类', parentId: null, source: 'model' },
+      { id: 'm-empty', name: '空模型', parentId: null, source: 'model' },
+      { id: 'm-user', name: '人工归类指向', parentId: null, source: 'model' },
+      { id: 'm-lock', name: '锁定指向', parentId: null, source: 'model' },
+      { id: 'u-root', name: '人工类', parentId: null, source: 'user' },
+      { id: 'u-child', name: '人工子类', parentId: 'm-plain', source: 'user' },
+    ],
+    assignments: {
+      's-m': { categoryId: 'm-plain', source: 'model' },
+      's-u': { categoryId: 'm-user', source: 'user' },
+      's-lock': { categoryId: 'm-lock', source: 'model' },
+      's-user': { categoryId: 'u-root', source: 'user' },
+    },
+    lockedSessions: { 's-lock': { at: 7, by: 'user' } },
+  })
+  const result = resetModelCategories(store)
+  assert.equal(result.removedCategories, 2, '只删没有人工/锁定引用的模型分类')
+  assert.equal(result.removedAssignments, 1)
+  assert.equal(result.keptUser, 2)
+  assert.deepEqual(result.store.categories.map(item => item.id).sort(), [
+    'm-lock', 'm-user', 'u-child', 'u-root',
+  ])
+  // 人工子类原本挂在被删的模型父类下：上提到顶层，不能悬空。
+  const userChild = result.store.categories.find(item => item.id === 'u-child')
+  assert.equal(userChild.parentId, null)
+  assert.equal(result.store.assignments['s-u'].source, 'user')
+  assert.equal(result.store.assignments['s-lock'].categoryId, 'm-lock')
+  assert.equal(result.store.assignments['s-m'], undefined)
+  assert.deepEqual(result.store.lockedSessions, { 's-lock': { at: 7, by: 'user' } })
+})
+
+await test('重新归类：清理该工作区的启动游标，其他工作区不受影响', () => {
+  const state = { lastRunAt: 123, processed: { 'ws-a-s1': 1, 'ws-a-s2': 2, 'ws-b-s1': 3 } }
+  const next = removeAutoProcessedSessions(state, ['ws-a-s1', 'ws-a-s2', 'missing'])
+  assert.equal(next.lastRunAt, 123)
+  assert.deepEqual(next.processed, { 'ws-b-s1': 3 })
+})
+
+await test('/category-reset：计数、保留规则、游标清理与重新入队', async () => {
+  await withTempHome(async home => {
+    const workspaceId = 'ws-auto-reset'
+    const sessions = ['reset-free-1', 'reset-free-2', 'reset-m', 'reset-u', 'reset-lock', 'reset-user']
+    const events = Object.fromEntries(sessions.map(id => [id, makeEvents()]))
+    const ctx = makeMultiCtx({ [workspaceId]: sessions }, { events })
+    await writeRawStore(home, {
+      version: 1,
+      categories: [
+        { id: 'm-plain', name: '模型类', parentId: null, source: 'model' },
+        { id: 'm-empty', name: '空模型', parentId: null, source: 'model' },
+        { id: 'm-user', name: '人工归类指向', parentId: null, source: 'model' },
+        { id: 'm-lock', name: '锁定指向', parentId: null, source: 'model' },
+        { id: 'u-root', name: '人工类', parentId: null, source: 'user' },
+      ],
+      assignments: {
+        'reset-m': { categoryId: 'm-plain', source: 'model' },
+        'reset-u': { categoryId: 'm-user', source: 'user' },
+        'reset-lock': { categoryId: 'm-lock', source: 'user' },
+        'reset-user': { categoryId: 'u-root', source: 'user' },
+      },
+      lockedSessions: { 'reset-lock': { at: 9, by: 'user' } },
+    }, workspaceId)
+    await mkdir(join(home, 'topic-map'), { recursive: true })
+    await writeFile(autoStatePath(home), JSON.stringify({
+      lastRunAt: 999,
+      processed: { 'reset-m': 1, 'reset-free-1': 2, 'other-workspace-session': 3 },
+    }), 'utf8')
+
+    const queue = configureAutoClassify({ execute: async () => {}, debounceMs: 60_000 })
+    try {
+      const missingConfirm = await resetCategoryWorkspace(ctx, { workspaceId })
+      assert.equal(missingConfirm.ok, false)
+      assert.equal(missingConfirm.httpStatus, 400)
+      assert.match(missingConfirm.error, /confirm/)
+      const falseConfirm = await resetCategoryWorkspace(ctx, { workspaceId, confirm: false })
+      assert.equal(falseConfirm.ok, false)
+      assert.equal(falseConfirm.httpStatus, 400)
+
+      const result = await resetCategoryWorkspace(ctx, { workspaceId, confirm: true })
+      assert.equal(result.ok, true, result.error)
+      assert.deepEqual(result.value, {
+        removedCategories: 2,
+        removedAssignments: 1,
+        queued: 3,
+        keptUser: 1,
+      })
+
+      const raw = await readRawStore(home, workspaceId)
+      assert.deepEqual(raw.categories.map(item => item.id).sort(), ['m-lock', 'm-user', 'u-root'])
+      assert.equal(raw.assignments['reset-m'], undefined)
+      assert.equal(raw.assignments['reset-u'].source, 'user')
+      assert.equal(raw.assignments['reset-lock'].categoryId, 'm-lock')
+      assert.deepEqual(raw.lockedSessions, { 'reset-lock': { at: 9, by: 'user' } })
+
+      const state = await readAutoState(home)
+      assert.deepEqual(state.processed, { 'other-workspace-session': 3 })
+      assert.equal(state.lastRunAt, 999, '重置不刷新 lastRunAt')
+
+      // 10 分钟节流：紧接着再重置一次，删除仍然执行，但不再入队。
+      const throttled = await resetCategoryWorkspace(ctx, { workspaceId, confirm: true })
+      assert.equal(throttled.ok, true, throttled.error)
+      assert.equal(throttled.value.throttled, true)
+      assert.equal(throttled.value.queued, 0)
+    } finally {
+      queue.dispose()
+    }
+  })
+})
+
+await test('/category-reset 已接线：confirm 缺失 400，confirm:true → 200', async () => {
+  await withTempHome(async () => {
+    const workspaceId = 'ws-auto-reset-route'
+    const handler = registerHandler({ [workspaceId]: [] })
+    const bad = await callRoute(handler, 'category-reset', { workspaceId })
+    assert.equal(bad.status, 400)
+    assert.match(bad.body.error, /confirm/)
+    const result = await callRoute(handler, 'category-reset', { workspaceId, confirm: true })
+    assert.equal(result.status, 200, JSON.stringify(result.body))
+    assert.equal(result.body.ok, true)
+    assert.equal(typeof result.body.value.removedCategories, 'number')
+    assert.equal(typeof result.body.value.removedAssignments, 'number')
+    assert.equal(typeof result.body.value.keptUser, 'number')
+    assert.equal(typeof result.body.value.queued, 'number')
+  })
 })
 
 // ── 纠错接口 ──────────────────────────────────────────────────────

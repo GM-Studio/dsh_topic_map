@@ -38,7 +38,7 @@ function loadModule() {
   assert.ok(end > at)
   const body = src.slice(src.indexOf('{', at) + 1, end)
   const patched = body.replace(/return module\.exports\s*$/,
-    'module.exports.__historyTabBody = HistoryTabBody; return module.exports')
+    'module.exports.__historyTabBody = HistoryTabBody; module.exports.__historyDiag = function () { return HISTORY_DIAG }; return module.exports')
   const params = ['require', 'window', 'document', 'localStorage', 'sessionStorage', 'fetch',
     'AbortController', 'setTimeout', 'clearTimeout', 'navigator']
   return new Function(...params, patched)
@@ -119,7 +119,7 @@ function setupRuntime(options) {
     globalThis.AbortController, setTimeout, clearTimeout, null)
   runtime.component = exported.__historyTabBody
   runtime.props = { sessionId: 's1', hideTabStrip: true }
-  return { runtime, fake, memory }
+  return { runtime, fake, memory, diag: () => exported.__historyDiag() }
 }
 
 async function mountHistory(options) {
@@ -142,6 +142,11 @@ await test('默认视图 = 当前会话最近轮次（空关键词 + sessionIds 
   assert.deepEqual(request.body.sessionIds, ['s1'])
   assert.equal(request.body.sort, 'time')
   assert.equal(request.body.keywords, '')
+  const diag = scene.diag()
+  assert.equal(diag.branch, 'default-recent')
+  assert.equal(diag.plan.idle, true)
+  assert.equal(diag.result.hits, 10)
+  assert.equal(diag.result.total, 25)
   scene.runtime.unmount()
 })
 
@@ -211,6 +216,8 @@ await test('分类会话列表在时间线视图下仍可达，分页重置', as
   await scene.runtime.settle()
   assert.ok(byClass(scene.runtime.tree, 'dsh_tm_histcatsession').length > 0, '分类会话列表必须可见')
   assert.ok(textOf(scene.runtime.tree).includes('该分类 1 个会话'))
+  assert.equal(scene.diag().branch, 'category-browse')
+  assert.equal(scene.diag().browse.total, 1)
   scene.runtime.unmount()
 })
 

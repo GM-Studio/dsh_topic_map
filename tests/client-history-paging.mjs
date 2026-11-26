@@ -88,11 +88,16 @@ await test('分支顺序：idle → error → 分类会话列表 → 时间线 �
   assert.ok(idle >= 0 && error > idle && category > error && timeline > category && rows > timeline)
 })
 
-await test('底部固定栏：列表与底栏兄弟节点，底栏 sticky + flex:none，分页在右侧', () => {
+await test('底部固定栏：列表与底栏兄弟节点，容器/结果区/底栏三段 flex 高度链', () => {
   assert.ok(src.includes("h('div', { className: 'dsh_tm_histbody'"))
   assert.ok(src.includes("h('div', { className: 'dsh_tm_histfoot', 'data-footer': 'pager' }"))
-  assert.ok(src.includes('position:sticky;bottom:0'))
-  assert.ok(src.includes('.dsh_tm_histbody{flex:1 1 auto;min-height:0;overflow:auto}'))
+  assert.ok(src.includes('.dsh_tm_history{position:relative;display:flex;flex-direction:column;height:100%;min-height:0'))
+  assert.ok(src.includes('.dsh_tm_histmain{flex:1 1 auto;min-height:0;display:flex;min-width:0}'))
+  assert.ok(src.includes('.dsh_tm_histpane{flex:1 1 auto;min-width:0;min-height:0;display:flex;flex-direction:column}'))
+  assert.ok(src.includes('.dsh_tm_histbody{flex:1 1 auto;min-height:0;overflow-y:auto}'))
+  assert.ok(src.includes('.dsh_tm_histfoot{position:sticky;bottom:0;z-index:3;flex:0 0 auto'))
+  assert.ok(src.includes('.dsh_tm_drawerbody .dsh_tm_history{height:100%;min-height:0}'))
+  assert.ok(src.includes('.dsh_tm_drawerbody .dsh_tm_histbody{overflow-y:auto;flex:1 1 auto;min-height:0}'))
   assert.ok(src.includes("'data-action': 'page-prev'"))
   assert.ok(src.includes("'data-action': 'page-next'"))
   assert.ok(src.includes("'第 ' + (page + 1) + ' / ' + pageCount + ' 页'"))
@@ -109,6 +114,13 @@ await test('切关键词/分类/视图/清空都会回第 1 页', () => {
   assert.ok(choose.includes('setPage(0)'))
   const view = src.slice(src.indexOf('function switchHistoryView'), src.indexOf('function switchHistoryView') + 300)
   assert.ok(view.includes('setPage(0)'))
+})
+
+await test('store 未就绪不重置分类；只有 store 已加载且确实缺失才回「全部」', () => {
+  assert.ok(src.includes("categoryData.status !== undefined && categoryData.status !== 'ready'"))
+  assert.ok(src.includes('!Array.isArray(categoryData.store.categories)'))
+  const effect = src.slice(src.indexOf("// 分类被删除 / 改名后"), src.indexOf("// 分类被删除 / 改名后") + 700)
+  assert.ok(effect.indexOf("status !== 'ready'") < effect.indexOf('categoryNameOf'))
 })
 
 finish()

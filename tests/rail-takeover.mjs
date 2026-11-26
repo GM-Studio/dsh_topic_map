@@ -589,25 +589,31 @@ await test('React 清掉 inline style / 标记：navObserver 立即补回 hidden
   dispose()
 })
 
-await test('自检失败：拆掉自绘轨、保留原生、灰字写明「原生轨无法隐藏」', async () => {
+await test('自检失败：拆掉自绘轨、保留原生、只写 console.debug 不弹灰字', async () => {
   const scene = buildScene()
-  const { win, calls, dispose } = makeTakeover(scene.doc, {
-    loadOutline: () => Promise.resolve(OUTLINE),
-    nativeNeverHidden: true,
-  })
-  await flush()
-  win.runTimers()
-  await flush()
+  const logs = []
+  const original = console.debug
+  console.debug = (...args) => { logs.push(args.join(' ')) }
+  try {
+    const { win, calls, dispose } = makeTakeover(scene.doc, {
+      loadOutline: () => Promise.resolve(OUTLINE),
+      nativeNeverHidden: true,
+    })
+    await flush()
+    win.runTimers()
+    await flush()
 
-  assert.equal(railOf(scene.doc), null, '自检失败必须移除自绘轨')
-  assert.equal(scene.nav.style.visibility, '', '原生必须恢复可见')
-  assert.equal(scene.nav.getAttribute('data-dsh-tm-native'), null)
-  assert.equal(visibleRailCount(scene.doc, win), 1, '失败后只剩原生一条')
-  const notice = scene.doc.getElementById('dsh_tm_rail_notice')
-  assert.ok(notice !== null)
-  assert.equal(notice.querySelector('.dsh_tm_railnoticetext').textContent, '历史轨未接管：原生轨无法隐藏')
-  assert.ok(calls.diag.includes('原生轨无法隐藏'))
-  dispose()
+    assert.equal(railOf(scene.doc), null, '自检失败必须移除自绘轨')
+    assert.equal(scene.nav.style.visibility, '', '原生必须恢复可见')
+    assert.equal(scene.nav.getAttribute('data-dsh-tm-native'), null)
+    assert.equal(visibleRailCount(scene.doc, win), 1, '失败后只剩原生一条')
+    assert.equal(scene.doc.getElementById('dsh_tm_rail_notice'), null, '界面上不再出现灰字')
+    assert.ok(logs.some(text => text.includes('原生轨无法隐藏')), '失败原因写进 console.debug')
+    assert.ok(calls.diag.includes('原生轨无法隐藏'))
+    dispose()
+  } finally {
+    console.debug = original
+  }
 })
 
 await test('三档宽度与内容：min 只有数字、std 摘要 10 字、max 多 HH:mm', async () => {
@@ -822,33 +828,43 @@ await test('大纲乱序 / 重复：按 turn 升序去重后再与 data-index �
 })
 
 // ── 3. 失配：不隐藏原生 ─────────────────────────────────────────────
-await test('失配（容器在但没有按钮）：不隐藏原生、不渲染自绘轨、底部灰字给原因', async () => {
+await test('失配（容器在但没有按钮）：不隐藏原生、不渲染自绘轨、原因只进 console.debug', async () => {
   const scene = buildScene({ buttonCount: 0 })
-  const { dispose } = makeTakeover(scene.doc)
-  await flush()
+  const logs = []
+  const original = console.debug
+  console.debug = (...args) => { logs.push(args.join(' ')) }
+  try {
+    const { dispose } = makeTakeover(scene.doc)
+    await flush()
 
-  assert.equal(scene.nav.style.visibility, '', '失配时绝不能隐藏原生')
-  assert.equal(scene.nav.getAttribute('aria-hidden'), null)
-  assert.equal(railOf(scene.doc), null, '失配时不能渲染半成品自绘轨')
-  const notice = scene.doc.getElementById('dsh_tm_rail_notice')
-  assert.ok(notice !== null, '失配必须留一行灰字')
-  const text = notice.querySelector('.dsh_tm_railnoticetext').textContent
-  assert.ok(text.includes('原生导航轨没有轮次按钮'), '灰字要写清具体原因：' + text)
-  assert.ok(text.includes('继续使用原生导航'))
-  dispose()
+    assert.equal(scene.nav.style.visibility, '', '失配时绝不能隐藏原生')
+    assert.equal(scene.nav.getAttribute('aria-hidden'), null)
+    assert.equal(railOf(scene.doc), null, '失配时不能渲染半成品自绘轨')
+    assert.equal(scene.doc.getElementById('dsh_tm_rail_notice'), null, '失配不再显示灰字')
+    assert.ok(logs.some(text => text.includes('原生导航轨没有轮次按钮')), '具体原因写进 console.debug：' + logs.join(' | '))
+    dispose()
+  } finally {
+    console.debug = original
+  }
 })
 
-await test('失配灰字可关闭，关闭后同一原因不再弹', async () => {
+await test('同一原因只 console.debug 一次，不重复打扰', async () => {
   const scene = buildScene({ buttonCount: 0 })
-  const { RAILTAKE, dispose } = makeTakeover(scene.doc)
-  await flush()
-  const notice = scene.doc.getElementById('dsh_tm_rail_notice')
-  notice.querySelector('.dsh_tm_railnoticex').dispatchEvent({ type: 'click' })
-  assert.equal(scene.doc.getElementById('dsh_tm_rail_notice'), null)
-
-  RAILTAKE.sync()
-  assert.equal(scene.doc.getElementById('dsh_tm_rail_notice'), null, '同一原因不重复打扰')
-  dispose()
+  const logs = []
+  const original = console.debug
+  console.debug = (...args) => { logs.push(args.join(' ')) }
+  try {
+    const { RAILTAKE, dispose } = makeTakeover(scene.doc)
+    await flush()
+    const first = logs.length
+    assert.ok(first >= 1, '失配至少写一条 console.debug')
+    RAILTAKE.sync()
+    assert.equal(logs.length, first, '同一原因不重复输出')
+    assert.equal(scene.doc.getElementById('dsh_tm_rail_notice'), null)
+    dispose()
+  } finally {
+    console.debug = original
+  }
 })
 
 await test('没有原生轨（轮次 < 2 / 未挂载）：静默，不报错也不弹灰字', async () => {
@@ -1228,6 +1244,18 @@ await test('⋯ → 复制轨道诊断：JSON 含量测字段并 toast', async (
   assert.equal(diag.num.text, '1')
   assert.equal(diag.tick.present, true)
   assert.ok(diag.css.numWidthVar.endsWith('px'))
+  assert.equal(typeof diag.history, 'object')
+  assert.equal(typeof diag.history.plan, 'object')
+  assert.equal(typeof diag.history.result, 'object')
+  assert.equal(typeof diag.history.categoryData, 'object')
+  assert.equal(typeof diag.history.browse, 'object')
+  assert.equal(typeof diag.history.dom.footerFixed, 'boolean')
+  assert.equal(typeof diag.history.dom.bodyScrollable, 'boolean')
+  assert.ok(['category-browse', 'default-recent', 'timeline', 'rows', 'idle', 'empty'].includes(diag.history.branch))
+  assert.equal(diag.nativeNav.found, true)
+  assert.equal(diag.nativeNav.tag, 'nav')
+  assert.equal(diag.nativeNav.visibility, 'hidden')
+  assert.equal(diag.nativeNav.dataAttr, 'hidden')
   assert.equal(notices[notices.length - 1], '已复制轨道诊断')
   dispose()
 })
@@ -1390,6 +1418,13 @@ await test('轨道与恢复药丸的 CSS 不含 box-shadow（三档共用一条�
   assert.ok(restore.includes('box-shadow:none'), '恢复药丸也不投影')
   assert.equal(/box-shadow:(?!none)/.test(restore), false)
   assert.ok(src.includes('.dsh_tm_drawer{'), '抽屉阴影保留')
+})
+
+await test('接管失败不再有界面灰字，只保留 console.debug', () => {
+  assert.equal(src.includes('历史轨未接管'), false, '源码不能再出现这句灰字')
+  assert.equal(src.includes('继续使用原生导航'), false)
+  assert.ok(src.includes("console.debug('[dsh-topic-map] '"), '降级原因写 console.debug')
+  assert.ok(src.includes('.dsh_tm_railnotice'), '旧 CSS 可保留用于清理历史 DOM')
 })
 
 // ── 汇总 ───────────────────────────────────────────────────────────

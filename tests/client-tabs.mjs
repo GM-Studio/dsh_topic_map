@@ -42,22 +42,26 @@ await test('快捷键：Ctrl+Shift+H 与 Alt+H 都走 DRAWER.toggle，且只在�
   assert.ok(src.includes("host.addEventListener('keydown', onKey, true)"))
 })
 
-await test('抽屉状态：默认打开/420px，宽度夹在 320–720，开关可持久化', async () => {
+await test('抽屉状态：默认打开，宽度按视口 30% 计算，开关可持久化', async () => {
   const start = src.indexOf('    var DRAWER = (function () {')
   const end = src.indexOf('\n    })()', start)
   assert.ok(start >= 0 && end > start)
   const body = [
+    extractFunction(src, 'drawerViewportWidth'),
+    extractFunction(src, 'drawerMaxWidth'),
+    extractFunction(src, 'drawerDefaultWidth'),
     extractFunction(src, 'drawerClampWidth'),
     extractFunction(src, 'drawerRead'),
     src.slice(start, end + '\n    })()'.length),
   ].join('\n')
   const memory = new Map()
   const factory = () => new Function(
-    'DRAWER_DEFAULT_WIDTH', 'DRAWER_MIN_WIDTH', 'DRAWER_MAX_WIDTH',
+    'DRAWER_MIN_WIDTH', 'DRAWER_MAX_WIDTH', 'DRAWER_NARROW_MAX_WIDTH',
+    'DRAWER_NARROW_BREAKPOINT', 'DRAWER_SMALL_BREAKPOINT',
     'DRAWER_OPEN_KEY', 'DRAWER_WIDTH_KEY', 'DRAWER_COLLAPSED_KEY',
     'localStorage', 'console',
     `${body};return DRAWER`,
-  )(420, 320, 720, 'dsh.tm.drawer.open', 'dsh.tm.drawer.width', 'dsh.tm.drawer.collapsed', {
+  )(300, 560, 420, 1100, 760, 'dsh.tm.drawer.open', 'dsh.tm.drawer.width', 'dsh.tm.drawer.collapsed', {
     getItem(key) { return memory.has(key) ? memory.get(key) : null },
     setItem(key, value) { memory.set(key, String(value)) },
   }, console)
@@ -65,13 +69,13 @@ await test('抽屉状态：默认打开/420px，宽度夹在 320–720，开关�
   const DRAWER = factory()
   const initial = DRAWER.snapshot()
   assert.equal(initial.open, true)
-  assert.equal(initial.width, 420)
+  assert.equal(initial.width, 384, '1280 × 30%')
   assert.equal(initial.collapsed, false)
 
   DRAWER.setWidth(100)
-  assert.equal(DRAWER.snapshot().width, 320)
+  assert.equal(DRAWER.snapshot().width, 300)
   DRAWER.setWidth(9999)
-  assert.equal(DRAWER.snapshot().width, 720)
+  assert.equal(DRAWER.snapshot().width, 560)
   DRAWER.setCollapsed(true)
   assert.equal(DRAWER.snapshot().collapsed, true)
   DRAWER.toggle()

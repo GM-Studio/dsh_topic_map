@@ -55,7 +55,7 @@ function makeRailFake() {
     ['dsh.tm.rail.native', '0'],
     ['dsh.tm.rail.autohide', '1'],
   ])
-  let width = 200
+  let tier = 'std'
   const listeners = []
   function emit() {
     for (const listener of listeners.slice()) listener()
@@ -72,8 +72,13 @@ function makeRailFake() {
       store.set('dsh.tm.rail.autohide', value === true ? '1' : '0')
       emit()
     },
-    widthOf() { return width },
-    setWidth(value) { width = value; emit() },
+    widthOf() { return tier === 'min' ? 28 : tier === 'max' ? 260 : 200 },
+    tier() { return tier },
+    effectiveTier() { return tier },
+    tierText() { return tier === 'min' ? '最小' : tier === 'max' ? '最大' : '标准' },
+    tierWidthOf() { return this.widthOf() },
+    setTier(value) { tier = value; store.set('dsh.tm.rail.tier.s1', value); emit() },
+    setWidth(value) { tier = value === 28 ? 'min' : value === 260 ? 'max' : 'std'; emit() },
     subscribe(listener) {
       listeners.push(listener)
       return function () {
@@ -121,7 +126,8 @@ async function mountSettings(options) {
     SETTINGS_SOURCE,
     'SettingsTabBody',
     [
-      'SETTINGVIEW', 'RAILVIEW', 'RAILTAKE', 'RAIL_DEFAULT_WIDTH', 'RIGHT_TABS',
+      'SETTINGVIEW', 'RAILVIEW', 'RAILTAKE', 'RAIL_DEFAULT_WIDTH',
+      'RAIL_TIER_MIN', 'RAIL_TIER_STD', 'RAIL_TIER_MAX', 'RIGHT_TABS',
       'SETTINGS_KIND', 'SETTINGS_TITLE', 'fetch', 'errorText', 'useTopicMapTheme',
       'currentWorkspaceId',
     ],
@@ -130,6 +136,7 @@ async function mountSettings(options) {
       RAILVIEW,
       rail,
       200,
+      'min', 'std', 'max',
       RIGHT_TABS,
       'topic-map-settings',
       '设置',
@@ -159,7 +166,7 @@ await test('四组渲染：引用 / 索引 / 界面 / 模型，字段齐全且�
   const { tree } = await mountSettings()
   assert.deepEqual(groupTitles(tree), ['引用', '索引', '界面', '模型'])
 
-  const segments = byClass(tree, 'dsh_tm_setsegbtn')
+  const segments = byClass(tree, 'dsh_tm_setsegbtn').filter(node => node.props['data-value'] !== undefined)
   assert.deepEqual(segments.map(textOf), ['精简（200 字）', '标准（400 字）', '详尽（800 字）'])
   assert.equal(segments.find(btn => btn.props['data-value'] === 'standard').props['aria-pressed'], 'true')
   assert.ok(textOf(tree).includes('超过配额的部分不会展开，并在注入块末尾注明'))
@@ -178,10 +185,10 @@ await test('四组渲染：引用 / 索引 / 界面 / 模型，字段齐全且�
 
   assert.equal(byData(tree, 'data-setting', 'railNative')[0].props.checked, false)
   assert.equal(byData(tree, 'data-setting', 'railAutoHide')[0].props.checked, true)
-  assert.ok(textOf(tree).includes('normal（200px）'))
+  assert.ok(textOf(tree).includes('轨道显示档位'))
+  assert.deepEqual(byData(tree, 'data-setting', 'railTier').map(node => textOf(node)), ['最小', '标准', '最大'])
   assert.ok(textOf(tree).includes('恢复原生导航轨'))
   assert.ok(textOf(tree).includes('自动隐藏导航轨'))
-  assert.ok(textOf(tree).includes('当前轨道宽度'))
 
   assert.ok(textOf(tree).includes('deepseek'))
   assert.ok(textOf(tree).includes('chat'))
@@ -272,9 +279,13 @@ await test('rail 设置：设置页写的值进 localStorage，外部改值设�
   await runtime.settle()
   assert.equal(byData(runtime.tree, 'data-setting', 'railNative')[0].props.checked, false)
 
-  rail.setWidth(320)
+  const maxBtn = byData(runtime.tree, 'data-setting', 'railTier')
+    .find(node => node.props['data-tier'] === 'max')
+  click(maxBtn)
   await runtime.settle()
-  assert.ok(textOf(runtime.tree).includes('wide（320px）'))
+  assert.equal(rail.store.get('dsh.tm.rail.tier.s1'), 'max')
+  assert.equal(byData(runtime.tree, 'data-setting', 'railTier')
+    .find(node => node.props['data-tier'] === 'max').props['aria-pressed'], 'true', '按钮与设置页同步')
 })
 
 await test('索引体积失败（404/503）：显示 —，title 写 Host 原因', async () => {

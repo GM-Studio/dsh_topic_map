@@ -30,7 +30,10 @@ function extractTakeover() {
   assert.ok(moduleStart >= 0, 'client.js 里找不到 RAILTAKE 段')
   const tail = src.indexOf('\n    })()', moduleStart)
   assert.ok(tail >= 0, 'RAILTAKE 段没有闭合')
-  return src.slice(start, tail + '\n    })()'.length)
+  const helperStart = src.indexOf('    function resolveActiveTurn')
+  const helperEnd = src.indexOf('    var HISTORY_CATEGORY_EMPTY_TEXT', helperStart)
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, 'client.js 里找不到当前轮单一事实源')
+  return src.slice(helperStart, helperEnd) + '\n' + src.slice(start, tail + '\n    })()'.length)
 }
 
 const TAKEOVER = extractTakeover()
@@ -149,7 +152,8 @@ class FakeElement {
   }
 
   getBoundingClientRect() {
-    return { top: this.top, bottom: this.top + this.height, height: this.height, left: 0, right: 100, width: 100 }
+    const width = this.width === undefined ? 100 : this.width
+    return { top: this.top, bottom: this.top + this.height, height: this.height, left: 0, right: width, width }
   }
 }
 
@@ -302,6 +306,8 @@ function makeWindow(store, settings) {
   return {
     timers,
     observers,
+    innerHeight: options.innerHeight === undefined ? 720 : options.innerHeight,
+    innerWidth: options.innerWidth === undefined ? 1280 : options.innerWidth,
     setTimeout(fn, delay) {
       const timer = { id: nextId, delay: delay === undefined ? 0 : delay, fn, cancelled: false }
       nextId += 1
@@ -365,6 +371,8 @@ function buildScene(options) {
   doc.body.appendChild(session)
   const scroller = doc.createElement('div')
   scroller.setAttribute('data-conversation-scroll', '')
+  scroller.width = settings.containerWidth === undefined ? 1280 : settings.containerWidth
+  scroller.height = settings.containerHeight === undefined ? 720 : settings.containerHeight
   session.appendChild(scroller)
   const slot = doc.createElement('div')
   slot.className = 'slot'
@@ -488,7 +496,7 @@ await test('接管成功：原生被隐藏、自绘轨插在原位、行数与�
   assert.equal(rowText(rows[0], 'dsh_tm_railnum'), '1')
   assert.equal(rowText(rows[0], 'dsh_tm_railtext'), '第一轮：把跳转做准')
   assert.equal(rowText(rows[0], 'dsh_tm_railtime'), '09:05')
-  assert.equal(rail.getAttribute('data-tier'), 'normal', '默认 200px → 标准档')
+  assert.equal(rail.getAttribute('data-tier'), 'std', '默认档位是标准')
 
   // 当前轮：aria-label「第 2 轮」→ 第 2 行 active
   assert.equal(rows[1].getAttribute('data-active'), '1')
@@ -563,56 +571,128 @@ await test('自检失败：拆掉自绘轨、保留原生、灰字写明「原�
   dispose()
 })
 
-await test('折叠宽度按轮号位数自适应：1/2/3/4 位数字完整，刻度仍在', async () => {
-  for (const maxTurn of [7, 12, 112, 1120]) {
-    const scene = buildScene()
-    const outline = {
-      available: true,
-      turns: [
-        { turn: 1, promptHead: '第一轮', endSeq: 10 },
-        { turn: maxTurn, promptHead: '最大轮', endSeq: maxTurn * 10 },
-      ],
-    }
-    const { RAILTAKE, win, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(outline) })
-    await flush()
-    RAILTAKE.setCollapsed(true)
-    win.runTimers()
+await test('三档宽度与内容：min 只有数字、std 摘要 10 字、max 多 HH:mm', async () => {
+  const longOutline = {
+    available: true,
+    turns: [
+      { turn: 1, promptHead: '一二三四五六七八九十十一十二', time: '9:05', endSeq: 10 },
+      { turn: 2, promptHead: '', time: '09:20', endSeq: 20 },
+      { turn: 3, promptHead: '第三轮', time: '23:07', endSeq: 30 },
+    ],
+  }
+  const scene = buildScene()
+  const { RAILTAKE, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(longOutline) })
+  await flush()
+  const rail = railOf(scene.doc)
+  assert.equal(rail.getAttribute('data-tier'), 'std', '默认 std')
+  assert.equal(rowText(rowButtons(scene.doc)[0], 'dsh_tm_railtext'), '一二三四五六七八九十…', '10 字 + …')
+  assert.ok(src.includes('[data-tier="std"] .dsh_tm_railtime'), 'std 用 CSS 隐藏时间')
+  assert.equal(rowText(rowButtons(scene.doc)[1], 'dsh_tm_railtext'), '（无摘要）', '空摘要灰字占位')
+  RAILTAKE.setTier('max')
+  assert.equal(rail.getAttribute('data-tier'), 'max')
+  assert.equal(rowText(rowButtons(scene.doc)[0], 'dsh_tm_railtime'), '09:05', '24 小时补零')
+  assert.equal(rowText(rowButtons(scene.doc)[2], 'dsh_tm_railtime'), '23:07')
+  RAILTAKE.setTier('min')
+  assert.equal(rail.getAttribute('data-tier'), 'min')
+  assert.equal(rowText(rowButtons(scene.doc)[0], 'dsh_tm_railnum'), '1', 'min 仍保留轮号')
+  const num = rowButtons(scene.doc)[1].querySelector('.dsh_tm_railnum')
+  num.scrollWidth = String(num.textContent).length * 7
+  num.clientWidth = 28 - 8
+  assert.ok(num.scrollWidth <= num.clientWidth, 'min 数字不裁切')
+  assert.equal(rowButtons(scene.doc)[0].querySelectorAll('.dsh_tm_railtick').length, 1, 'min 保留刻度')
+  dispose()
+})
+
+await test('档位循环 min → std → max → min，按钮 title 写明下一档', async () => {
+  const scene = buildScene()
+  const { RAILTAKE, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  const rail = railOf(scene.doc)
+  const btn = rail.querySelector('.dsh_tm_railcollapse')
+  RAILTAKE.setTier('min'); assert.equal(rail.getAttribute('data-tier'), 'min')
+  assert.ok(String(btn.title).includes('标准'), 'min 下一档是标准：' + btn.title)
+  btn.dispatchEvent({ type: 'click' }); assert.equal(rail.getAttribute('data-tier'), 'std')
+  btn.dispatchEvent({ type: 'click' }); assert.equal(rail.getAttribute('data-tier'), 'max')
+  btn.dispatchEvent({ type: 'click' }); assert.equal(rail.getAttribute('data-tier'), 'min')
+  dispose()
+})
+
+await test('Alt+[ 在 min 与上次档位间切换，不循环', async () => {
+  const scene = buildScene()
+  const { RAILTAKE, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  const rail = railOf(scene.doc)
+  RAILTAKE.setTier('max')
+  scene.doc.dispatch('keydown', { altKey: true, code: 'BracketLeft', key: '[' })
+  assert.equal(rail.getAttribute('data-tier'), 'min')
+  scene.doc.dispatch('keydown', { altKey: true, code: 'BracketLeft', key: '[' })
+  assert.equal(rail.getAttribute('data-tier'), 'max', '回到上次 max，而不是 std')
+  dispose()
+})
+
+await test('按会话记忆档位：默认 std，读 tier.s1 还原 max', async () => {
+  const scene = buildScene()
+  const { dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  assert.equal(railOf(scene.doc).getAttribute('data-tier'), 'std')
+  dispose()
+  const scene2 = buildScene()
+  const second = makeTakeover(scene2.doc, {
+    store: makeStore({ 'dsh.tm.rail.tier.s1': 'max' }),
+    loadOutline: () => Promise.resolve(OUTLINE),
+  })
+  await flush()
+  assert.equal(railOf(scene2.doc).getAttribute('data-tier'), 'max')
+  second.dispose()
+})
+
+await test('自动收起：离开 600ms 进 min，移入回用户档位；不写 tier', async () => {
+  const scene = buildScene()
+  const { RAILTAKE, win, store, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  const rail = railOf(scene.doc)
+  RAILTAKE.setTier('std')
+  rail.dispatchEvent({ type: 'pointerleave' })
+  assert.equal(rail.getAttribute('data-tier'), 'std', '600ms 前不动')
+  win.runTimers()
+  assert.equal(rail.getAttribute('data-tier'), 'min', '600ms 后进 min')
+  assert.equal(store.getItem('dsh.tm.rail.tier.s1'), 'std', '自动收起不改用户档位')
+  rail.dispatchEvent({ type: 'pointerenter' })
+  win.runTimers()
+  assert.equal(rail.getAttribute('data-tier'), 'std', '移入回 std')
+  dispose()
+})
+
+await test('宽度公式：700 / 1200 / 2000 容器下 std/max 落在范围，std < max', async () => {
+  for (const width of [700, 1200, 2000]) {
+    const scene = buildScene({ containerWidth: width })
+    const { RAILTAKE, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
     await flush()
     const rail = railOf(scene.doc)
-    const expected = Math.min(44, Math.max(28, String(maxTurn).length * 7 + 10))
-    assert.equal(rail.style['--dsh-tm-rail-collapsed-width'], expected + 'px', maxTurn + ' 位宽')
-    assert.equal(rail.getAttribute('data-collapsed'), '1')
-    const nums = rail.querySelectorAll('.dsh_tm_railnum')
-    assert.deepEqual(nums.map(node => node.textContent), ['1', String(maxTurn)])
-    const ticks = rail.querySelectorAll('.dsh_tm_railtick')
-    assert.equal(ticks.length, 2, '折叠态仍保留刻度')
-    for (const num of nums) {
-      // 假 DOM 没有布局引擎：用公式给出的可用宽度模拟浏览器测量。
-      const needed = String(num.textContent).length * 7
-      num.scrollWidth = needed
-      num.clientWidth = expected - 2 /* tick */ - 2 /* 间距 */ - 4 /* 左右内边距 */
-      assert.ok(num.scrollWidth <= num.clientWidth, `${maxTurn} 轮号不裁切`)
-    }
+    const narrow = width < 900
+    const stdLow = narrow ? 140 : 150
+    const expectedStd = Math.min(240, Math.max(stdLow, Math.round(width * 0.16)))
+    const expectedMax = Math.min(narrow ? 280 : 340, Math.max(200, Math.round(width * 0.22)))
+    RAILTAKE.setTier('std')
+    assert.equal(rail.style['--dsh-tm-rail-visible-width'], expectedStd + 'px', width + ' std')
+    RAILTAKE.setTier('max')
+    assert.equal(rail.style['--dsh-tm-rail-visible-width'], expectedMax + 'px', width + ' max')
+    assert.ok(expectedStd < expectedMax, 'std < max')
+    assert.ok(rail.style.clipPath !== undefined)
     dispose()
   }
 })
 
-await test('折叠动画期间不做 getComputedStyle；动画结束后恢复', async () => {
-  const scene = buildScene()
-  const { RAILTAKE, win, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
-  await flush()
-  // 先清掉挂载自检的计时器，避免它把调用数带进来。
-  win.runTimers()
-  await flush()
-
-  const before = win.getComputedStyleCalls()
-  RAILTAKE.setCollapsed(true)
-  assert.equal(RAILTAKE.animating(), true)
-  RAILTAKE.sync()
-  assert.equal(win.getComputedStyleCalls(), before, '折叠中 sync 不得量几何')
-  win.runTimers()
-  assert.equal(RAILTAKE.animating(), false)
-  dispose()
+await test('源码不再有 railgrip / dsh.tm.rail.width / data-collapsed', async () => {
+  assert.equal(src.includes('dsh_tm_railgrip'), false)
+  assert.equal(src.includes('dsh.tm.rail.width'), false)
+  assert.equal(src.includes('dsh_tm_rail[data-collapsed'), false)
+  assert.ok(src.includes('--dsh-tm-rail-visible-width'))
+  assert.ok(src.includes('clamp(18px,1.6vh,24px)'))
+  assert.ok(src.includes('clamp(10px,0.75vw,12px)'))
+  assert.ok(src.includes('clamp(4px,0.5vh,8px)'))
+  assert.equal(src.includes('max-height:420px'), false, '轨道高度不能写死 420px')
+  assert.ok(src.includes('max-height:50vh') || src.includes("maxHeight = Math.max(120"))
 })
 
 await test('抽屉覆盖模式：setDockObscured 临时隐藏自绘轨，关闭后恢复', async () => {
@@ -672,7 +752,7 @@ await test('点击行：调用跳转函数，带上轮号、seq、会话与轮�
   assert.equal(payload.sessionId, 's1')
   assert.deepEqual(payload.turns, [1, 2, 3])
   assert.equal(payload.nav, scene.nav, '优先点本会话的原生按钮，而不是全局第一个 nav')
-  assert.equal(rowButtons(scene.doc)[2].getAttribute('data-active'), '1', '点击后立即标记为活动')
+  assert.equal(rowButtons(scene.doc)[2].getAttribute('data-active'), '0', '点击不再手动写死 active，交给 resolveActiveTurn')
   dispose()
 })
 
@@ -750,7 +830,7 @@ await test('大纲接口 404：用原生 aria-label 轮号渲染，并标注降�
   const rows = rowButtons(scene.doc)
   assert.equal(rows.length, 3, '降级也要有刻度，不能白屏')
   assert.deepEqual(rows.map(row => row.getAttribute('data-turn')), ['1', '2', '3'])
-  assert.equal(rowText(rows[0], 'dsh_tm_railtext'), '', '没有摘要时只显示轮号')
+  assert.equal(rowText(rows[0], 'dsh_tm_railtext'), '（无摘要）', '没有摘要时显示灰字占位')
   const note = railOf(scene.doc).querySelector('.dsh_tm_railnote')
   assert.ok(note.textContent.includes('轮次摘要不可用'), '要说明为什么没有摘要：' + note.textContent)
   dispose()
@@ -797,185 +877,129 @@ await test('开关偏好跨启动保持：native=1 时启动不接管', async ()
 })
 
 // ── 6. 三档宽度与按会话记忆 ─────────────────────────────────────────
-await test('宽度按会话记忆：读 localStorage 键还原档位', async () => {
+await test('设置与头部按钮同步：setTier 写入同一份偏好', async () => {
   const scene = buildScene()
-  const store = makeStore({ 'dsh.tm.rail.width.s1': '40' })
-  const { dispose } = makeTakeover(scene.doc, { store, loadOutline: () => Promise.resolve(OUTLINE) })
-  await flush()
-  assert.equal(railOf(scene.doc).getAttribute('data-tier'), 'hair')
-  assert.equal(railOf(scene.doc).style.width, '40px')
-  dispose()
-})
-
-await test('拖拽释放：吸附到 40/200/320 并写回本会话的键', async () => {
-  const scene = buildScene()
-  const store = makeStore({ 'dsh.tm.rail.width.s1': '40' })
-  const { dispose, RAILTAKE } = makeTakeover(scene.doc, { store, loadOutline: () => Promise.resolve(OUTLINE) })
-  await flush()
-
-  const grip = railOf(scene.doc).querySelector('.dsh_tm_railgrip')
-  grip.dispatchEvent({ type: 'pointerdown', clientX: 400 })
-  scene.doc.dispatch('pointermove', { clientX: 110 }) // 向左拖 290px
-  scene.doc.dispatch('pointerup', {})
-  await flush()
-
-  assert.equal(store.getItem('dsh.tm.rail.width.s1'), '320', '拖到最宽吸附 320 并记住')
-  assert.equal(railOf(scene.doc).getAttribute('data-tier'), 'wide')
-  assert.equal(RAILTAKE.widthOf(), 320)
-  dispose()
-})
-
-// ── 6b. 抓手：常显竖线 + pointer capture + 实时宽度 + 吸附 ───────────
-await test('抓手：8px 命中区常显竖线，pointer capture 后拖拽实时改宽并吸附', async () => {
-  const scene = buildScene()
-  const { dispose, store } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
-  await flush()
-
-  const rail = railOf(scene.doc)
-  const grip = rail.querySelector('.dsh_tm_railgrip')
-  assert.ok(grip !== null, '必须渲染抓手')
-  assert.ok(grip.querySelector('.dsh_tm_railgripbar') !== null, '抓手必须常显一条竖线（不是只靠 hover 背景）')
-  assert.ok(String(grip.title).includes('40 / 200 / 320'), '抓手 title 要写明三档，拖拽才可发现')
-
-  grip.dispatchEvent({ type: 'pointerdown', clientX: 400, pointerId: 7 })
-  assert.equal(grip.capturedPointer, 7, 'pointerdown 必须 setPointerCapture')
-  assert.equal(scene.doc.body.style.cursor, 'col-resize', '拖拽时文档光标要变成 col-resize')
-  assert.equal(scene.doc.body.style.userSelect, 'none', '拖拽时禁止选中')
-  assert.equal(rail.getAttribute('data-dragging'), '1')
-
-  scene.doc.dispatch('pointermove', { clientX: -100, pointerId: 7 })
-  assert.equal(rail.style.width, '320px', '实时宽度必须夹在 40–320 的内边界')
-  scene.doc.dispatch('pointermove', { clientX: 500, pointerId: 7 })
-  assert.equal(rail.style.width, '100px', '拖拽中实时跟手，不在 move 阶段吸附')
-  assert.equal(store.getItem('dsh.tm.rail.width.s1'), null, '松开前不写宽度')
-
-  scene.doc.dispatch('pointerup', { pointerId: 7 })
-  assert.equal(store.getItem('dsh.tm.rail.width.s1'), '40', '松开后 100px 吸附到最近的 40 档并写回')
-  assert.equal(rail.style.width, '40px')
-  assert.equal(rail.getAttribute('data-tier'), 'hair')
-  assert.equal(scene.doc.body.style.cursor, '', '松开后恢复光标')
-  assert.equal(scene.doc.body.style.userSelect, '', '松开后恢复选中')
-  assert.equal(grip.releasedPointer, 7, 'pointerup 要 releasePointerCapture')
-  assert.equal(rail.getAttribute('data-dragging'), null)
-  dispose()
-})
-
-// ── 6c. 折叠 / 自动隐藏 / 快捷键 ────────────────────────────────────
-await test('折叠条：点击收成 16px 竖条，再点展开；按会话记忆', async () => {
-  const scene = buildScene()
-  const { dispose, store } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
-  await flush()
-
-  const rail = railOf(scene.doc)
-  const collapse = rail.querySelector('.dsh_tm_railcollapse')
-  assert.ok(collapse !== null, '必须有折叠条')
-  assert.equal(rail.style.width, '200px', '默认宽度 200')
-
-  collapse.dispatchEvent({ type: 'click' })
-  assert.equal(rail.getAttribute('data-collapsed'), '1')
-  assert.equal(rail.style.width, '200px', '折叠不再改 width，避免逐帧布局')
-  assert.ok(src.includes('clip-path:inset(0 0 0 calc(100% - var(--dsh-tm-rail-collapsed-width,28px)))'), '折叠用动态 clip-path')
-  assert.equal(store.getItem('dsh.tm.rail.collapsed.s1'), '1', '折叠状态按会话记忆')
-  assert.equal(rail.getAttribute('data-tier'), 'normal', '三档宽度语义不变')
-
-  collapse.dispatchEvent({ type: 'click' })
-  assert.equal(rail.getAttribute('data-collapsed'), '0')
-  assert.equal(rail.style.width, '200px')
-  assert.equal(store.getItem('dsh.tm.rail.collapsed.s1'), '0')
-  dispose()
-})
-
-await test('折叠状态跨启动还原（同一会话的 localStorage 键）', async () => {
-  const scene = buildScene()
-  const store = makeStore({ 'dsh.tm.rail.collapsed.s1': '1' })
-  const { dispose } = makeTakeover(scene.doc, { store, loadOutline: () => Promise.resolve(OUTLINE) })
-  await flush()
-  assert.equal(railOf(scene.doc).getAttribute('data-collapsed'), '1')
-  assert.equal(railOf(scene.doc).style.width, '200px')
-  assert.equal(railOf(scene.doc).getAttribute('data-collapsed'), '1')
-  dispose()
-})
-
-await test('Alt+[ 切换折叠/展开', async () => {
-  const scene = buildScene()
-  const { dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  const { RAILTAKE, dispose, store } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
   await flush()
   const rail = railOf(scene.doc)
-  scene.doc.dispatch('keydown', { altKey: true, code: 'BracketLeft', key: '[' })
-  assert.equal(rail.getAttribute('data-collapsed'), '1', 'Alt+[ 应收起')
-  scene.doc.dispatch('keydown', { altKey: true, code: 'BracketLeft', key: '[' })
-  assert.equal(rail.getAttribute('data-collapsed'), '0', '再按一次展开')
+  RAILTAKE.setTier('max')
+  assert.equal(store.getItem('dsh.tm.rail.tier.s1'), 'max')
+  assert.equal(RAILTAKE.tier(), 'max')
+  assert.equal(RAILTAKE.effectiveTier(), 'max')
+  assert.equal(rail.getAttribute('data-tier'), 'max')
+  assert.equal(rail.querySelector('.dsh_tm_railcollapse').textContent, '≡')
+  RAILTAKE.setTier('min')
+  assert.equal(rail.querySelector('.dsh_tm_railcollapse').textContent, '⌄')
   dispose()
 })
 
-await test('自动折叠：离开 600ms 收成 16px 竖条，移入立即展开；默认开', async () => {
+await test('抽屉覆盖模式：setDockObscured', async () => {
   const scene = buildScene()
-  const { RAILTAKE, dispose, win, store } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  const { RAILTAKE, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
   await flush()
   const rail = railOf(scene.doc)
-  assert.equal(RAILTAKE.autoHideEnabled(), true, '默认开启自动折叠')
-  assert.equal(rail.getAttribute('data-collapsed'), '0')
-  assert.ok(src.includes('transition:clip-path .18s ease-out,opacity .18s ease-out'),
-    '过渡必须只走 clip-path/opacity，不再动 width')
-  assert.equal(src.includes('transition:width .16s'), false, 'width 过渡会逐帧触发布局')
+  RAILTAKE.setDockObscured(true)
+  assert.equal(rail.style.visibility, 'hidden')
+  RAILTAKE.setDockObscured(false)
+  assert.equal(rail.style.visibility, '')
+  dispose()
+})
 
-  rail.dispatchEvent({ type: 'pointerleave' })
-  assert.equal(win.timers.some(timer => timer.delay === 600), true, '离开后应挂 600ms 定时器')
-  assert.equal(rail.getAttribute('data-collapsed'), '0', '计时未到不立即收起')
+await test('min 档按最大轮号位数：1/2/3/4 位数字完整且保留刻度', async () => {
+  for (const maxTurn of [7, 12, 112, 1120]) {
+    const outline = {
+      available: true,
+      turns: [
+        { turn: 1, promptHead: '一', endSeq: 10 },
+        { turn: maxTurn, promptHead: '最大轮', endSeq: maxTurn * 10 },
+      ],
+    }
+    const scene = buildScene()
+    const { RAILTAKE, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(outline) })
+    await flush()
+    RAILTAKE.setTier('min')
+    const rail = railOf(scene.doc)
+    const expected = Math.min(44, Math.max(28, String(maxTurn).length * 7 + 10))
+    assert.equal(rail.style['--dsh-tm-rail-visible-width'], expected + 'px')
+    const nums = rail.querySelectorAll('.dsh_tm_railnum')
+    assert.deepEqual(nums.map(node => node.textContent), ['1', String(maxTurn)])
+    assert.equal(rail.querySelectorAll('.dsh_tm_railtick').length, 2)
+    for (const num of nums) {
+      num.scrollWidth = String(num.textContent).length * 7
+      num.clientWidth = expected - 8
+      assert.ok(num.scrollWidth <= num.clientWidth, `${maxTurn} 数字不裁切`)
+    }
+    dispose()
+  }
+})
+
+await test('容器滚动改变 → 轨道 active 跟着变，行节点引用不变', async () => {
+  const scene = buildScene({ turnRows: [1, 2, 3] })
+  const { RAILTAKE, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  const rows = rowButtons(scene.doc)
+  const turnNodes = scene.scroller.querySelectorAll('[data-chat-turn]')
+  turnNodes[0].top = 100
+  turnNodes[1].top = 300
+  turnNodes[2].top = 500
+  RAILTAKE.sync()
+  assert.equal(RAILTAKE.currentTurn(), 1, '顶部第一条完整可见轮 = 1')
+  turnNodes[0].top = -100
+  turnNodes[1].top = 50
+  turnNodes[2].top = 250
+  RAILTAKE.sync()
+  assert.equal(RAILTAKE.currentTurn(), 2, '滚动后 active 跟到 2')
+  assert.equal(rows[1].getAttribute('data-active'), '1')
+  assert.equal(rows[0], rowButtons(scene.doc)[0], '滚动不重建行节点')
+  dispose()
+})
+
+await test('程序化跳转 3 次重试：命中目标后 active 停在目标轮', async () => {
+  const scene = buildScene({ turnRows: [1, 2, 3] })
+  const { RAILTAKE, win, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+  await flush()
+  const turnNodes = scene.scroller.querySelectorAll('[data-chat-turn]')
+  turnNodes[0].top = 100
+  turnNodes[1].top = 300
+  turnNodes[2].top = 500
+  RAILTAKE.sync()
+  rowButtons(scene.doc)[2].dispatchEvent({ type: 'click' })
+  turnNodes[0].top = -300
+  turnNodes[1].top = -100
+  turnNodes[2].top = 20
   win.runTimers()
-  assert.equal(rail.getAttribute('data-collapsed'), '1', '自动收起必须是几何折叠，不只是变淡')
-  assert.equal(rail.getAttribute('data-autohide'), '1')
-  assert.equal(rail.style.width, '200px', '折叠用 clip-path，width 固定')
-  assert.equal(store.getItem('dsh.tm.rail.collapsed.s1'), null, '自动折叠不写手动折叠键')
-
-  rail.dispatchEvent({ type: 'pointerenter' })
-  assert.equal(rail.getAttribute('data-collapsed'), '0', '移入立即展开')
-  assert.equal(rail.getAttribute('data-autohide'), '0')
-  assert.equal(rail.style.width, '200px', '展开回当前档位')
+  await flush()
+  assert.equal(RAILTAKE.currentTurn(), 3, '重试后自然落到目标轮')
+  assert.equal(rowButtons(scene.doc)[2].getAttribute('data-active'), '1')
   dispose()
 })
 
-await test('自动折叠计时在移入时取消；设置关掉后不再收起', async () => {
-  const scene = buildScene()
-  const { RAILTAKE, dispose, win, store } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
+await test('程序化跳转仍不匹配：以实际可见轮为准，不卡在目标值', async () => {
+  const scene = buildScene({ turnRows: [1, 2, 3] })
+  const { RAILTAKE, win, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
   await flush()
-  const rail = railOf(scene.doc)
-
-  rail.dispatchEvent({ type: 'pointerleave' })
-  rail.dispatchEvent({ type: 'pointerenter' })
+  const turnNodes = scene.scroller.querySelectorAll('[data-chat-turn]')
+  turnNodes[0].top = 100
+  turnNodes[1].top = 300
+  turnNodes[2].top = 500
+  RAILTAKE.sync()
+  rowButtons(scene.doc)[2].dispatchEvent({ type: 'click' })
+  // 跳转失败：实际仍停在轮 1。
   win.runTimers()
-  assert.equal(rail.getAttribute('data-collapsed'), '0', '移入后旧的折叠计时器必须取消')
-
-  RAILTAKE.setAutoHide(false)
-  assert.equal(store.getItem('dsh.tm.rail.autohide'), '0', '设置关掉要写共享键')
-  rail.dispatchEvent({ type: 'pointerleave' })
-  win.runTimers()
-  assert.equal(rail.getAttribute('data-collapsed'), '0', '关掉后离开不收起')
-  assert.equal(rail.style.width, '200px')
+  await flush()
+  assert.equal(RAILTAKE.currentTurn(), 1, '不能硬撑目标 3')
+  assert.equal(rowButtons(scene.doc)[0].getAttribute('data-active'), '1')
   dispose()
 })
 
-await test('手动折叠优先：自动折叠不会把手动收起的轨展开', async () => {
-  const scene = buildScene()
-  const { dispose, win, store } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
-  await flush()
-  const rail = railOf(scene.doc)
-  const collapse = rail.querySelector('.dsh_tm_railcollapse')
-
-  collapse.dispatchEvent({ type: 'click' })
-  assert.equal(rail.getAttribute('data-collapsed'), '1')
-  assert.equal(store.getItem('dsh.tm.rail.collapsed.s1'), '1', '手动折叠按会话持久化')
-
-  rail.dispatchEvent({ type: 'pointerleave' })
-  win.runTimers()
-  rail.dispatchEvent({ type: 'pointerenter' })
-  assert.equal(rail.getAttribute('data-collapsed'), '1', '手动折叠时移入不能自动展开')
-  assert.equal(rail.style.width, '200px', '手动折叠也走 clip-path')
-
-  scene.doc.dispatch('keydown', { altKey: true, code: 'BracketLeft', key: '[' })
-  assert.equal(rail.getAttribute('data-collapsed'), '0', 'Alt+[ 是手动展开入口')
-  assert.equal(store.getItem('dsh.tm.rail.collapsed.s1'), '0')
-  dispose()
+await test('轨道整体高度自适应：<500 容器用 40vh，普通容器用 50vh', async () => {
+  for (const [height, innerHeight, expected] of [[720, 720, 360], [400, 720, 288]]) {
+    const scene = buildScene({ containerHeight: height })
+    const { win, dispose } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE), innerHeight })
+    await flush()
+    assert.equal(railOf(scene.doc).style.maxHeight, expected + 'px', height + ' 高容器')
+    dispose()
+  }
 })
 
 await test('滚动只更新 data-active：轨节点与行节点引用都不变', async () => {
@@ -1057,12 +1081,12 @@ await test('偏好同步：setter 写同一份 localStorage，其它实例/订�
 
   RAILTAKE.setNativePreferred(false)
   RAILTAKE.setAutoHide(false)
-  RAILTAKE.setWidth(40)
+  RAILTAKE.setTier('max')
   assert.ok(notified >= 3, '每个 setter 都应通知订阅者（设置页据此重渲染）')
   assert.equal(store.getItem('dsh.tm.rail.native'), '0')
   assert.equal(store.getItem('dsh.tm.rail.autohide'), '0')
-  assert.equal(store.getItem('dsh.tm.rail.width.s1'), '40')
-  assert.equal(RAILTAKE.widthOf(), 40)
+  assert.equal(store.getItem('dsh.tm.rail.tier.s1'), 'max')
+  assert.equal(RAILTAKE.tier(), 'max')
 
   // 第二个实例模拟另一处设置面：读同一份 store，必须看到刚写的值。
   const scene2 = buildScene()
@@ -1070,14 +1094,14 @@ await test('偏好同步：setter 写同一份 localStorage，其它实例/订�
   await flush()
   assert.equal(second.RAILTAKE.nativePreferred(), false)
   assert.equal(second.RAILTAKE.autoHideEnabled(), false)
-  assert.equal(second.RAILTAKE.widthOf(), 40)
-  assert.equal(railOf(scene2.doc).style.width, '40px')
+  assert.equal(second.RAILTAKE.tier(), 'max')
+  assert.equal(railOf(scene2.doc).getAttribute('data-tier'), 'max')
   second.dispose()
   unsubscribe()
   dispose()
 })
 
-await test('rail ⋯ 菜单：恢复原生 / 自动隐藏 / 收窄 / 加宽都走同一套 setter', async () => {
+await test('rail ⋯ 菜单：恢复原生 / 自动隐藏 / 切换档位都走同一套 setter', async () => {
   const scene = buildScene()
   const { RAILTAKE, dispose, store } = makeTakeover(scene.doc, { loadOutline: () => Promise.resolve(OUTLINE) })
   await flush()
@@ -1091,26 +1115,17 @@ await test('rail ⋯ 菜单：恢复原生 / 自动隐藏 / 收窄 / 加宽都�
   assert.ok(menu !== null, '⋯ 应打开菜单')
   let items = menu.querySelectorAll('.dsh_tm_railmenuitem')
   const labelOf = node => node.querySelector('.dsh_tm_railmenutext').textContent
-  assert.deepEqual(items.map(labelOf), ['恢复原生导航轨', '自动隐藏', '收窄', '加宽'])
+  assert.deepEqual(items.map(labelOf), ['恢复原生导航轨', '自动隐藏', '切换显示档位'])
 
   items.find(item => labelOf(item) === '自动隐藏').dispatchEvent({ type: 'click' })
   assert.equal(store.getItem('dsh.tm.rail.autohide'), '0', '菜单开关写共享键')
   assert.equal(rail.querySelector('.dsh_tm_railmenu'), null, '点完关闭菜单')
 
+  RAILTAKE.setTier('std')
   more.dispatchEvent({ type: 'click' })
   items = rail.querySelector('.dsh_tm_railmenu').querySelectorAll('.dsh_tm_railmenuitem')
-  items.find(item => labelOf(item) === '收窄').dispatchEvent({ type: 'click' })
-  assert.equal(store.getItem('dsh.tm.rail.width.s1'), '40', '收窄到 hair 40')
-  assert.equal(rail.getAttribute('data-tier'), 'hair')
-
-  more.dispatchEvent({ type: 'click' })
-  items = rail.querySelector('.dsh_tm_railmenu').querySelectorAll('.dsh_tm_railmenuitem')
-  items.find(item => labelOf(item) === '加宽').dispatchEvent({ type: 'click' })
-  assert.equal(store.getItem('dsh.tm.rail.width.s1'), '200', '加宽回 normal 200')
-  more.dispatchEvent({ type: 'click' })
-  items = rail.querySelector('.dsh_tm_railmenu').querySelectorAll('.dsh_tm_railmenuitem')
-  items.find(item => labelOf(item) === '加宽').dispatchEvent({ type: 'click' })
-  assert.equal(store.getItem('dsh.tm.rail.width.s1'), '320', '再加宽到 wide 320')
+  items.find(item => labelOf(item) === '切换显示档位').dispatchEvent({ type: 'click' })
+  assert.equal(rail.getAttribute('data-tier'), 'max')
   dispose()
 })
 
@@ -1138,7 +1153,7 @@ await test('原生模式：右缘药丸存在，点击写 native=0 并立即接�
   dispose()
 })
 
-await test('Alt+[ 在原生模式下切回插件轨；插件轨下仍是折叠', async () => {
+await test('Alt+[ 在原生模式下切回插件轨；插件轨下进 min', async () => {
   const scene = buildScene()
   const store = makeStore({ 'dsh.tm.rail.native': '1' })
   const { RAILTAKE, dispose } = makeTakeover(scene.doc, { store, loadOutline: () => Promise.resolve(OUTLINE) })
@@ -1151,7 +1166,7 @@ await test('Alt+[ 在原生模式下切回插件轨；插件轨下仍是折叠',
   assert.ok(railOf(scene.doc) !== null)
 
   scene.doc.dispatch('keydown', { altKey: true, code: 'BracketLeft', key: '[' })
-  assert.equal(railOf(scene.doc).getAttribute('data-collapsed'), '1', '插件轨下 Alt+[ 仍是折叠')
+  assert.equal(railOf(scene.doc).getAttribute('data-tier'), 'min', '插件轨下 Alt+[ 进 min')
 
   RAILTAKE.setNativePreferred(true)
   await flush()

@@ -20,6 +20,9 @@ const src = readClient()
 const { test, finish } = makeRunner('client-drawer')
 
 const SOURCE = [
+  extractFunction(src, 'drawerViewportWidth'),
+  extractFunction(src, 'drawerMaxWidth'),
+  extractFunction(src, 'drawerDefaultWidth'),
   extractFunction(src, 'drawerClampWidth'),
   extractFunction(src, 'drawerRead'),
   src.slice(src.indexOf('    var DRAWER = (function () {'), src.indexOf('\n    })()', src.indexOf('    var DRAWER = (function () {')) + '\n    })()'.length),
@@ -81,6 +84,7 @@ function setupDom() {
 async function mount(options) {
   const settings = options || {}
   const dom = setupDom()
+  if (settings.viewportWidth !== undefined) dom.window.innerWidth = settings.viewportWidth
   const previous = {
     document: globalThis.document,
     window: globalThis.window,
@@ -106,13 +110,14 @@ async function mount(options) {
     SOURCE,
     'TopicMapDrawer',
     ['RIGHT_TABS', 'HISTORY_KIND', 'STATS_KIND', 'SETTINGS_KIND',
-      'DRAWER_DEFAULT_WIDTH', 'DRAWER_MIN_WIDTH', 'DRAWER_MAX_WIDTH', 'DRAWER_COLLAPSED_WIDTH',
+      'DRAWER_MIN_WIDTH', 'DRAWER_MAX_WIDTH', 'DRAWER_NARROW_MAX_WIDTH',
+      'DRAWER_NARROW_BREAKPOINT', 'DRAWER_SMALL_BREAKPOINT', 'DRAWER_COLLAPSED_WIDTH',
       'DRAWER_OPEN_KEY', 'DRAWER_WIDTH_KEY', 'DRAWER_COLLAPSED_KEY', 'DRAWER_PUSH_CHECK_MS',
       'HistoryTabBody', 'StatsTabBody', 'SettingsTabBody',
       'RAILTAKE', 'useTopicMapTheme'],
     [
       RIGHT_TABS, 'topic-map-history', 'topic-map-stats', 'topic-map-settings',
-      420, 320, 720, 48,
+      300, 560, 420, 1100, 760, 48,
       'dsh.tm.drawer.open', 'dsh.tm.drawer.width', 'dsh.tm.drawer.collapsed', 700,
       BODIES.HistoryTabBody, BODIES.StatsTabBody, BODIES.SettingsTabBody,
       { setDockObscured(value) { railCalls.push(value) } },
@@ -132,7 +137,7 @@ async function mount(options) {
   return { runtime, tree: runtime.tree, column: dom.column, intervals, railCalls, memory, cleanup }
 }
 
-await test('默认打开：420px，对话列 margin-right = 420px', async () => {
+await test('默认打开：视口 1400px 时 30% = 420px，并推挤对话列', async () => {
   const mounted = await mount()
   const drawer = byClass(mounted.tree, 'dsh_tm_drawer')[0]
   assert.ok(drawer !== undefined)
@@ -143,21 +148,22 @@ await test('默认打开：420px，对话列 margin-right = 420px', async () => 
   assert.equal(mounted.column.style.marginRight, '', '卸载必须恢复 margin')
 })
 
-await test('宽度三档：720 / 420 / 320 都按当前宽度写 style 与 margin', async () => {
-  for (const width of [720, 420, 320]) {
-    const mounted = await mount()
-    // 直接调用状态 setter，再 settle。
-    const start = src.indexOf('    var DRAWER = (function () {')
-    const end = src.indexOf('\n    })()', start)
-    const body = src.slice(start, end + '\n    })()'.length)
-    // 组件已经 mount；这里通过重新 mount 前写 storage 较绕，改用全局 DRAWER 不可见，
-    // 因此用 storage 预置宽度 + 重新 mount。
-    mounted.cleanup()
+await test('宽度自适应：560 / 420 / 300 都按当前宽度写 style 与 margin', async () => {
+  for (const width of [560, 420, 300]) {
     const seeded = await mount({ storage: [['dsh.tm.drawer.width', String(width)]] })
     const drawer = byClass(seeded.tree, 'dsh_tm_drawer')[0]
     assert.equal(drawer.props.style.width, width + 'px')
     assert.equal(seeded.column.style.marginRight, width + 'px')
     seeded.cleanup()
+  }
+})
+
+await test('视口公式：1920→560、1000→300（上限 420）、1280→384', async () => {
+  for (const [viewport, expected] of [[1280, 384], [1920, 560], [2560, 560], [3840, 560], [1000, 300]]) {
+    const mounted = await mount({ viewportWidth: viewport })
+    const drawer = byClass(mounted.tree, 'dsh_tm_drawer')[0]
+    assert.equal(drawer.props.style.width, expected + 'px', viewport + 'px 视口')
+    mounted.cleanup()
   }
 })
 
@@ -204,6 +210,18 @@ await test('margin 连续 3 次被冲掉：降级覆盖模式、灰字说明、�
   assert.ok(mounted.railCalls.includes(true), '覆盖模式下历史轨要自动隐藏，避免重叠')
   mounted.cleanup()
   assert.ok(mounted.railCalls.includes(false), '卸载恢复轨道')
+})
+
+await test('视口 < 760 默认关闭；打开后强制覆盖，不推挤对话列', async () => {
+  const mounted = await mount({ viewportWidth: 700 })
+  const pill = byClass(mounted.tree, 'dsh_tm_drawerpill')[0]
+  assert.ok(pill !== undefined, '小屏默认关闭只给药丸')
+  click(pill)
+  await mounted.runtime.settle()
+  const drawer = byClass(mounted.runtime.tree, 'dsh_tm_drawer')[0]
+  assert.equal(drawer.props['data-overlay'], '1')
+  assert.equal(mounted.column.style.marginRight, '', '覆盖模式不能推挤')
+  mounted.cleanup()
 })
 
 await test('布局断点写在 CSS：560 并排 / 420–560 顶部行 / <420 单列与设置纵排', async () => {

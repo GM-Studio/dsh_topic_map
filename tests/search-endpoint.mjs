@@ -345,6 +345,32 @@ await test('索引缺失的会话也进结果（回退全文抽取），并计�
   })
 })
 
+await test('warmup 标记：命中未索引会话为 true，补齐后为 false', async () => {
+  await withTempHome(async () => {
+    const events = { 'sess-warmup': makeEvents([{ prompt: '预热标记词' }]) }
+    const { ctx } = makeCtx({ events })
+
+    const first = await searchWorkspaceIndex(ctx, {
+      workspaceId: 'ws-1',
+      keywords: '预热标记词',
+      limit: 10,
+      now: BASE_TIME + 10_000,
+    })
+    assert.equal(first.warmup, true, '命中未索引会话时应标记本次触发了后台同步')
+    assert.ok(first.coverage.indexing >= 1)
+
+    await flushIndexSyncs()
+    const second = await searchWorkspaceIndex(ctx, {
+      workspaceId: 'ws-1',
+      keywords: '预热标记词',
+      limit: 10,
+      now: BASE_TIME + 10_000,
+    })
+    assert.equal(second.warmup, false, '索引已补齐后不应再标记 warmup')
+    assert.equal(second.coverage.indexing, 0)
+  })
+})
+
 await test('索引损坏/过期一律回退，并计入 missing', async () => {
   await withTempHome(async () => {
     const events = {
@@ -706,6 +732,7 @@ await test('没有工作区：返回空结果骨架（不抛错）', async () =>
   assert.equal(result.truncated, false)
   assert.equal(result.offset, 0)
   assert.equal(result.hasMore, false)
+  assert.equal(result.warmup, false)
   assert.deepEqual(result.indexed, { ready: 0, missing: 0 })
   assert.equal(typeof result.elapsedMs, 'number')
 })
@@ -840,7 +867,7 @@ await test('响应契约字段齐全', async () => {
     const result = await searchWorkspaceIndex(ctx, { workspaceId: 'ws-1', keywords: '词' })
     assert.deepEqual(Object.keys(result).sort(), [
       'coverage', 'elapsedMs', 'hasMore', 'hits', 'indexed', 'offset', 'scanned',
-      'total', 'truncated', 'workspace', 'workspaceId',
+      'total', 'truncated', 'warmup', 'workspace', 'workspaceId',
     ])
     assert.deepEqual(Object.keys(result.indexed).sort(), ['missing', 'ready'])
     assert.deepEqual(Object.keys(result.coverage).sort(), [

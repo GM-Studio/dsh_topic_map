@@ -209,7 +209,7 @@ await test('不传 categoryId：仍是全部会话，响应含分页字段', asy
     assert.equal(result.coverage.sessions, ALL_SESSIONS.length)
     assert.deepEqual(Object.keys(result).sort(), [
       'coverage', 'elapsedMs', 'hasMore', 'hits', 'indexed', 'offset', 'scanned',
-      'total', 'truncated', 'workspace', 'workspaceId',
+      'total', 'truncated', 'warmup', 'workspace', 'workspaceId',
     ])
     assert.deepEqual(Object.keys(result.coverage).sort(), [
       'indexed', 'indexing', 'scannedFromLog', 'sessions',

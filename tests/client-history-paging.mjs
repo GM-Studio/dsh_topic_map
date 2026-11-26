@@ -145,4 +145,27 @@ await test('覆盖会话为 0 且有分类：专用空态文案', () => {
   assert.equal(emptyText({ coverage: { sessions: 0 } }, ''), '没有匹配的轮次')
 })
 
+await test('分页后不再出现「还有 N 条未显示」旧文案', () => {
+  assert.equal(src.includes('条未显示'), false)
+  assert.ok(src.includes("'共 ' + pageTotal + ' 条"))
+})
+
+await test('工作区缓存/预热/取消接口存在', () => {
+  assert.ok(src.includes('var HISTORY_CACHE = new Map()'))
+  assert.ok(src.includes('var HISTORY_CACHE_TTL_MS = 5 * 60 * 1000'))
+  assert.ok(src.includes('requestTopicMap(\'workspace-warmup\''))
+  assert.ok(src.includes('requestTopicMap(\'categories\', body, { signal: signal })'))
+  assert.ok(src.includes('dsh_tm_histskel'))
+})
+
+await test('定位跳转：同会话不重置，跨会话保存选中/滚动并 rAF 恢复', () => {
+  assert.ok(src.includes('var sameSession = String(hit.sessionId'))
+  assert.ok(src.includes('HISTORY_JUMP_RESTORE = {'))
+  assert.ok(src.includes("targetSession: hit.sessionId"))
+  assert.ok(src.includes('selectedKey: savedKey'))
+  assert.ok(src.includes('scrollTop: savedScroll'))
+  assert.ok(src.includes('requestAnimationFrame(apply)'))
+  assert.ok(src.includes('body.scrollTop = top'))
+})
+
 finish()

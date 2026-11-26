@@ -81,6 +81,10 @@ const COMPONENT_SOURCE = [
   extractFunction(src, 'categoryAutoText'),
   extractFunction(src, 'categoryAutoNoModel'),
   extractFunction(src, 'categoryAutoUnclassified'),
+  extractFunction(src, 'historyCacheGet'),
+  extractFunction(src, 'historyCacheEnsure'),
+  extractFunction(src, 'historyCachePutCategories'),
+  extractFunction(src, 'historyWarmup'),
   extractFunction(src, 'CategoryAutoStatus'),
   extractFunction(src, 'sessionTimeInfoOf'),
   extractFunction(src, 'requestTopicMap'),
@@ -110,11 +114,13 @@ async function mount(options = {}) {
     [
       'CATEGORY_ALL_ID', 'CATEGORY_ALL_NAME', 'CATEGORY_ROOT_ID', 'CATEGORY_ROOT_NAME',
       'CATEGORY_AUTO_POLL_MS', 'CATEGORY_AUTO_POLL_MAX',
+      'HISTORY_CACHE', 'HISTORY_CACHE_TTL_MS', 'HISTORY_WARMED',
       'fetch', 'errorText', 'useTopicMapTheme', 'currentWorkspaceId',
     ],
     [
       ALL_ID, ALL_NAME, ROOT_ID, ROOT_NAME,
       30000, 4,
+      new Map(), 300000, {},
       fake.fetch, error => String(error && error.message ? error.message : error),
       function () {}, () => Promise.resolve('ws-1'),
     ],
@@ -210,6 +216,16 @@ await test('选中态与过滤参数：全部 → ""，未归类 → __none__，
   assert.deepEqual(selected.selected, ['', '__none__', 'c-reader'])
   selected.runtime.unmount()
 })
+
+await test('进入工作区触发一次 workspace-warmup', async () => {
+  const { runtime, fake } = await mount()
+  await runtime.settle()
+  const warmups = fake.calls.filter(call => call.action === 'workspace-warmup')
+  assert.equal(warmups.length, 1)
+  assert.deepEqual(warmups[0].body, { workspaceId: 'ws-1' })
+  runtime.unmount()
+})
+
 
 await test('分类为 0 且有会话：触发 category-auto-start，并显示状态灰字', async () => {
   const { runtime, fake } = await mount({ store: { version: 1, categories: [], assignments: {} } })

@@ -154,6 +154,13 @@ function searchCalls(scene) {
   return scene.fake.calls.filter(call => call.action === 'search')
 }
 
+await test('无缓存首帧：6 行骨架，不是空白', () => {
+  const scene = setupRuntime()
+  scene.runtime.renderOnce()
+  assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histskel').length, 6)
+  scene.runtime.unmount()
+})
+
 await test('初始「全部」：/search 空关键词、无 categoryId，渲染轮次行', async () => {
   const scene = await mountHistory()
   assert.equal(byClass(scene.runtime.tree, 'dsh_tm_histrecenthead').length, 0)
@@ -166,7 +173,9 @@ await test('初始「全部」：/search 空关键词、无 categoryId，渲染�
   const request = searchCalls(scene)[0]
   assert.equal(request.body.keywords, '')
   assert.equal(Object.prototype.hasOwnProperty.call(request.body, 'categoryId'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(request.body, 'sort'), false, '浏览态不显式传 sort')
   assert.equal(request.body.workspaceId, 'ws-1', '必须与 /categories 同一 workspaceId')
+  assert.ok(textOf(byClass(scene.runtime.tree, 'dsh_tm_histstats')[0]).includes('时间'), '空关键词底栏说明为「时间」')
   assert.deepEqual({ offset: request.body.offset, limit: request.body.limit }, { offset: 0, limit: 10 })
   const diag = scene.diag()
   assert.equal(diag.branch, 'rows')

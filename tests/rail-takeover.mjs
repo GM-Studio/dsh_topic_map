@@ -152,9 +152,15 @@ class FakeElement {
   }
 
   getBoundingClientRect() {
-    const width = this.width === undefined ? 100 : this.width
+    let width = this.width === undefined ? 100 : this.width
+    let height = this.height
+    if (String(this.className).split(' ').includes('dsh_tm_railmeasure')) {
+      // 假 DOM 没有字体排版：用固定字宽模拟 11px/600 的量尺。
+      width = 18 + 7 * Math.max(0, String(this.textContent || '').length - 1)
+      height = 16
+    }
     const left = this.left === undefined ? 0 : this.left
-    return { top: this.top, bottom: this.top + this.height, height: this.height, left, right: left + width, width }
+    return { top: this.top, bottom: this.top + height, height, left, right: left + width, width }
   }
 }
 
@@ -343,7 +349,10 @@ function makeWindow(store, settings) {
       if (element !== null && element !== undefined && element.style !== undefined
         && element.style.visibility === 'hidden') visibility = 'hidden'
       if (options.nativeNeverHidden === true) visibility = 'visible'
-      return { right: '12px', top: '300px', maxHeight: '420px', visibility }
+      return {
+        right: '12px', top: '300px', maxHeight: '420px', visibility,
+        overflow: 'visible', fontSize: '11px', borderLeftWidth: '1px', paddingLeft: '3px',
+      }
     },
     getComputedStyleCalls() { return computedStyleCalls },
     addEventListener() {},
@@ -419,8 +428,9 @@ function makeTakeover(doc, options) {
   const store = settings.store || makeStore()
   const win = makeWindow(store, settings)
   const calls = { jump: [], diag: [] }
-  const factory = new Function('RAILVIEW', TAKEOVER + '\n;return RAILTAKE')
-  const RAILTAKE = factory(VIEW)
+  const notices = []
+  const factory = new Function('RAILVIEW', 'showJumpNotice', 'navigator', TAKEOVER + '\n;return RAILTAKE')
+  const RAILTAKE = factory(VIEW, message => { notices.push(message) }, settings.navigator)
   const dispose = RAILTAKE.start({
     document: doc,
     window: win,
@@ -430,7 +440,7 @@ function makeTakeover(doc, options) {
     jump: payload => { calls.jump.push(payload); return Promise.resolve({ ok: true }) },
     diag: message => calls.diag.push(message),
   })
-  return { RAILTAKE, dispose, store, win, calls }
+  return { RAILTAKE, dispose, store, win, calls, notices }
 }
 
 const flush = async () => { for (let i = 0; i < 6; i += 1) await Promise.resolve() }
@@ -689,6 +699,8 @@ await test('源码不再有 railgrip / dsh.tm.rail.width / data-collapsed', asyn
   assert.equal(src.includes('dsh.tm.rail.width'), false)
   assert.equal(src.includes('dsh_tm_rail[data-collapsed'), false)
   assert.equal(src.includes('inset(0 0 0'), false, '不再用左侧 clip-path 裁剪')
+  assert.equal(src.includes('digits * 7'), false, 'min 宽度不再用位数公式')
+  assert.ok(src.includes('dsh_tm_railmeasure'))
   assert.ok(src.includes('--dsh-tm-rail-visible-width'))
   assert.ok(src.includes('clamp(18px,1.6vh,24px)'))
   assert.ok(src.includes('clamp(10px,0.75vw,12px)'))
@@ -921,7 +933,9 @@ await test('min 档按最大轮号位数：1/2/3/4 位数字完整且保留刻�
     await flush()
     RAILTAKE.setTier('min')
     const rail = railOf(scene.doc)
-    const expected = Math.min(44, Math.max(28, String(maxTurn).length * 7 + 10))
+    const measured = 18 + 7 * (String(maxTurn).length - 1)
+    const expected = Math.round(measured + 14)
+    assert.equal(rail.style['--dsh-tm-rail-num-width'], measured + 'px', '量尺宽度写进 CSS 变量')
     assert.equal(rail.style['--dsh-tm-rail-visible-width'], expected + 'px')
     assert.equal(rail.style.width, expected + 'px', 'min 档轨道宽度就是可见宽度')
     assert.equal(rail.style.clipPath, 'none', 'min 档不能再用左侧裁剪')
@@ -929,17 +943,25 @@ await test('min 档按最大轮号位数：1/2/3/4 位数字完整且保留刻�
     assert.equal(rail.getBoundingClientRect().width, expected, '轨道 rect 宽度 = visible')
     const nums = rail.querySelectorAll('.dsh_tm_railnum')
     assert.deepEqual(nums.map(node => node.textContent), ['1', String(maxTurn)])
-    assert.equal(rail.querySelectorAll('.dsh_tm_railtick').length, 2)
+    const ticks = rail.querySelectorAll('.dsh_tm_railtick')
+    assert.equal(ticks.length, 2, '刻度节点必须存在')
+    for (const tick of ticks) {
+      tick.width = 2
+      tick.height = 8
+      assert.ok(tick.getBoundingClientRect().width >= 2, '刻度宽 >= 2')
+      assert.ok(tick.getBoundingClientRect().height >= 6, '刻度高 >= 6')
+    }
     for (const num of nums) {
-      const needed = String(num.textContent).length * 7
+      const needed = 18 + 7 * (String(num.textContent).length - 1)
       num.scrollWidth = needed
       num.clientWidth = needed
       num.width = needed
-      num.left = expected - 2 - needed
+      // rail 内容区 = 边框内宽；row padding 3 + tick 2 + gap 4。
+      num.left = 1 + 3 + 2 + 4
       const numRect = num.getBoundingClientRect()
       const railRect = rail.getBoundingClientRect()
-      assert.ok(numRect.left >= railRect.left, `${maxTurn} 数字左边不越界`)
-      assert.ok(numRect.right <= railRect.right, `${maxTurn} 数字右边不越界`)
+      assert.ok(numRect.left >= railRect.left + 1, `${maxTurn} 数字左边有边距`)
+      assert.ok(numRect.right <= railRect.right - 1, `${maxTurn} 数字右边有边距`)
       assert.ok(num.scrollWidth <= num.clientWidth, `${maxTurn} 数字不裁切`)
     }
     dispose()
@@ -1128,7 +1150,7 @@ await test('rail ⋯ 菜单：恢复原生 / 自动隐藏 / 切换档位都走�
   assert.ok(menu !== null, '⋯ 应打开菜单')
   let items = menu.querySelectorAll('.dsh_tm_railmenuitem')
   const labelOf = node => node.querySelector('.dsh_tm_railmenutext').textContent
-  assert.deepEqual(items.map(labelOf), ['恢复原生导航轨', '自动隐藏', '切换显示档位'])
+  assert.deepEqual(items.map(labelOf), ['恢复原生导航轨', '自动隐藏', '复制轨道诊断', '切换显示档位'])
 
   items.find(item => labelOf(item) === '自动隐藏').dispatchEvent({ type: 'click' })
   assert.equal(store.getItem('dsh.tm.rail.autohide'), '0', '菜单开关写共享键')
@@ -1143,6 +1165,38 @@ await test('rail ⋯ 菜单：恢复原生 / 自动隐藏 / 切换档位都走�
 })
 
 // ── 6e. 原生模式的切回药丸 / 命中标记 ────────────────────────────────
+await test('⋯ → 复制轨道诊断：JSON 含量测字段并 toast', async () => {
+  const copied = []
+  const clipboard = { clipboard: { writeText(text) { copied.push(text); return Promise.resolve() } } }
+  const scene = buildScene()
+  const { RAILTAKE, notices, dispose } = makeTakeover(scene.doc, {
+    loadOutline: () => Promise.resolve(OUTLINE),
+    navigator: clipboard,
+  })
+  await flush()
+  RAILTAKE.setTier('min')
+  const rail = railOf(scene.doc)
+  rail.width = 39
+  const more = rail.querySelector('.dsh_tm_railmore')
+  more.dispatchEvent({ type: 'click' })
+  const menu = rail.querySelector('.dsh_tm_railmenu')
+  const item = menu.querySelectorAll('.dsh_tm_railmenuitem')
+    .find(node => node.querySelector('.dsh_tm_railmenutext').textContent === '复制轨道诊断')
+  assert.ok(item !== undefined, 'min 档也必须能打开 ⋯ 菜单并复制诊断')
+  item.dispatchEvent({ type: 'click' })
+  await flush()
+  assert.equal(copied.length, 1)
+  const diag = JSON.parse(copied[0])
+  assert.equal(diag.tier, 'min')
+  assert.ok(diag.rail.w > 0)
+  assert.equal(typeof diag.rail.overflow, 'string')
+  assert.equal(diag.num.text, '1')
+  assert.equal(diag.tick.present, true)
+  assert.ok(diag.css.numWidthVar.endsWith('px'))
+  assert.equal(notices[notices.length - 1], '已复制轨道诊断')
+  dispose()
+})
+
 await test('原生模式：右缘药丸存在，点击写 native=0 并立即接管', async () => {
   const scene = buildScene()
   const store = makeStore({ 'dsh.tm.rail.native': '1' })

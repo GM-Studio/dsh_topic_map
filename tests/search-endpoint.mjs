@@ -42,7 +42,7 @@ function makeEvents(specs, offset = 0) {
   const events = []
   const push = (type, data, time) => events.push({ type, seq: seq++, time, data })
   specs.forEach((spec, index) => {
-    const start = BASE_TIME + offset + index * 60_000
+    const start = spec.start ?? (BASE_TIME + offset + index * 60_000)
     const turn = spec.turn ?? index
     push('turn/start', { turn }, start)
     push('user/message', {
@@ -501,6 +501,115 @@ await test('sort=time 按结束时间倒序', async () => {
       now: BASE_TIME + 700_000,
     })
     assert.deepEqual(result.hits.map(hit => hit.sessionId), ['sess-new', 'sess-old'])
+  })
+})
+
+await test('空 keywords 默认按时间倒序（浏览态最近的在前）', async () => {
+  await withTempHome(async () => {
+    const events = {
+      'sess-browse': makeEvents([
+        { prompt: '浏览 第一轮' },
+        { prompt: '浏览 第二轮' },
+        { prompt: '浏览 第三轮' },
+      ]),
+    }
+    const { ctx } = makeCtx({ events })
+    await syncSessionIndexFor(ctx, 'sess-browse')
+
+    const result = await searchWorkspaceIndex(ctx, {
+      workspaceId: 'ws-1',
+      keywords: '',
+      limit: 10,
+      now: BASE_TIME + 10 * 60_000,
+    })
+    assert.equal(result.total, 3)
+    assert.deepEqual(result.hits.map(hit => hit.turn), [2, 1, 0], '浏览态默认应最近一轮在前')
+  })
+})
+
+await test('空 keywords + 显式 sort:relevance：尊重调用方，不强制时间倒序', async () => {
+  await withTempHome(async () => {
+    const events = {
+      'sess-browse-rel': makeEvents([
+        { prompt: '浏览 第一轮' },
+        { prompt: '浏览 第二轮' },
+        { prompt: '浏览 第三轮' },
+      ]),
+    }
+    const { ctx } = makeCtx({ events })
+    await syncSessionIndexFor(ctx, 'sess-browse-rel')
+
+    const result = await searchWorkspaceIndex(ctx, {
+      workspaceId: 'ws-1',
+      keywords: '',
+      sort: 'relevance',
+      limit: 10,
+      now: BASE_TIME + 10 * 60_000,
+    })
+    assert.equal(result.total, 3)
+    assert.deepEqual(result.hits.map(hit => hit.turn), [0, 1, 2], '显式 relevance 保持同分稳定顺序')
+  })
+})
+
+await test('有关键词时默认相关度不变：高匹配的早会话仍排在新会话前', async () => {
+  await withTempHome(async () => {
+    const events = {
+      'sess-match-old': makeEvents([{ prompt: '共同词 共同词 共同词' }], 0),
+      'sess-match-new': makeEvents([{ prompt: '共同词 新会话' }], 60_000),
+    }
+    const { ctx } = makeCtx({ events })
+    await syncSessionIndexFor(ctx, 'sess-match-old')
+    await syncSessionIndexFor(ctx, 'sess-match-new')
+
+    const base = {
+      workspaceId: 'ws-1',
+      keywords: '共同词',
+      limit: 10,
+      now: BASE_TIME + 10 * 60_000,
+    }
+    const withDefault = await searchWorkspaceIndex(ctx, base)
+    const withRelevance = await searchWorkspaceIndex(ctx, { ...base, sort: 'relevance' })
+    const withTime = await searchWorkspaceIndex(ctx, { ...base, sort: 'time' })
+    assert.deepEqual(
+      withDefault.hits.map(hit => hit.sessionId),
+      withRelevance.hits.map(hit => hit.sessionId),
+      '有关键词时默认必须仍是相关度',
+    )
+    assert.deepEqual(withDefault.hits.map(hit => hit.sessionId), ['sess-match-old', 'sess-match-new'])
+    assert.deepEqual(withTime.hits.map(hit => hit.sessionId), ['sess-match-new', 'sess-match-old'])
+  })
+})
+
+await test('浏览态时间倒序分页稳定：同时间按 turn 升序，跨页不重不漏', async () => {
+  await withTempHome(async () => {
+    const sameStart = BASE_TIME + 30 * 60_000
+    const events = {
+      'sess-browse-page': makeEvents([
+        { prompt: '同刻 第一轮', start: sameStart },
+        { prompt: '同刻 第二轮', start: sameStart },
+        { prompt: '同刻 第三轮', start: sameStart },
+      ]),
+    }
+    const { ctx } = makeCtx({ events })
+    await syncSessionIndexFor(ctx, 'sess-browse-page')
+    const base = {
+      workspaceId: 'ws-1',
+      keywords: '',
+      limit: 2,
+      now: BASE_TIME + 60 * 60_000,
+    }
+
+    const full = await searchWorkspaceIndex(ctx, { ...base, limit: 10 })
+    assert.deepEqual(full.hits.map(hit => hit.turn), [0, 1, 2], '同时间按 turn 升序')
+
+    const page1 = await searchWorkspaceIndex(ctx, { ...base, offset: 0 })
+    const page2 = await searchWorkspaceIndex(ctx, { ...base, offset: 2 })
+    assert.deepEqual(page1.hits.map(hit => hit.turn), [0, 1])
+    assert.deepEqual(page2.hits.map(hit => hit.turn), [2])
+    assert.equal(page1.hasMore, true)
+    assert.equal(page2.hasMore, false)
+    assert.equal(page1.total, 3)
+    assert.equal(page2.total, 3)
   })
 })
 

@@ -126,4 +126,22 @@ await test('store 未就绪不重置分类；只有 store 已加载且确实缺�
   assert.ok(effect.indexOf("status !== 'ready'") < effect.indexOf('categoryNameOf'))
 })
 
+await test('工作区名兜底：title → path 最后一段 → 空', () => {
+  const name = new Function(`${extractFunction(src, 'workspaceDisplayName')};return workspaceDisplayName`)()
+  assert.equal(name({ id: 'w', title: 'demo', path: '/x/other' }), 'demo')
+  assert.equal(name({ id: 'w', path: '/a/b/demo' }), 'demo')
+  assert.equal(name({ id: 'w' }), '')
+  assert.equal(name(null), '')
+})
+
+await test('覆盖会话为 0 且有分类：专用空态文案', () => {
+  const emptyText = new Function(
+    'HISTORY_EMPTY_TEXT',
+    `${extractFunction(src, 'historyEmptyText')};return historyEmptyText`,
+  )('没有匹配的轮次')
+  assert.equal(emptyText({ coverage: { sessions: 0 } }, 'c-reader'), '该分类下没有可检索的会话')
+  assert.equal(emptyText({ coverage: { sessions: 2 } }, 'c-reader'), '没有匹配的轮次')
+  assert.equal(emptyText({ coverage: { sessions: 0 } }, ''), '没有匹配的轮次')
+})
+
 finish()

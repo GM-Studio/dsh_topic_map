@@ -27,6 +27,8 @@ const SOURCE = [
   extractFunction(src, 'drawerRead'),
   src.slice(src.indexOf('    var DRAWER = (function () {'), src.indexOf('\n    })()', src.indexOf('    var DRAWER = (function () {')) + '\n    })()'.length),
   extractFunction(src, 'drawerColumn'),
+  extractFunction(src, 'workspaceDisplayName'),
+  extractFunction(src, 'requestTopicMap'),
   extractFunction(src, 'TopicMapDrawerSurface'),
   extractFunction(src, 'TopicMapDrawer'),
 ].join('\n')
@@ -101,6 +103,10 @@ async function mount(options) {
     getItem(key) { return memory.has(key) ? memory.get(key) : null },
     setItem(key, value) { memory.set(key, String(value)) },
   }
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = function () {
+    return Promise.resolve({ status: 200, json: () => Promise.resolve({ ok: true, value: [] }) })
+  }
   const intervals = []
   globalThis.setInterval = function (fn) { intervals.push(fn); return intervals.length }
   globalThis.clearInterval = function () {}
@@ -133,6 +139,7 @@ async function mount(options) {
     globalThis.localStorage = previous.localStorage
     globalThis.setInterval = previous.setInterval
     globalThis.clearInterval = previous.clearInterval
+    globalThis.fetch = previousFetch
   }
   return { runtime, tree: runtime.tree, column: dom.column, intervals, railCalls, memory, cleanup }
 }
@@ -185,12 +192,29 @@ await test('关闭：只渲染右缘药丸，点击打开抽屉', async () => {
   const mounted = await mount({ storage: [['dsh.tm.drawer.open', '0']] })
   const pill = byClass(mounted.tree, 'dsh_tm_drawerpill')[0]
   assert.ok(pill !== undefined)
-  assert.equal(pill.props.title, '话题地图（Ctrl+Shift+H）')
+  assert.equal(pill.props.title, '历史检索')
+  assert.equal(pill.props['aria-label'], '历史检索')
   assert.equal(textOf(pill), '⋮⋮')
   click(pill)
   await mounted.runtime.settle()
-  assert.ok(byClass(mounted.runtime.tree, 'dsh_tm_drawer')[0] !== undefined)
+  const drawer = byClass(mounted.runtime.tree, 'dsh_tm_drawer')[0]
+  assert.ok(drawer !== undefined)
+  assert.equal(drawer.props['aria-label'], '历史检索')
+  assert.equal(textOf(byClass(mounted.runtime.tree, 'dsh_tm_drawertitle')[0]), '历史检索')
+  const folds = byClass(mounted.runtime.tree, 'dsh_tm_drawerfold')
+  const close = folds[folds.length - 1]
+  assert.equal(close.props.title, '关闭历史检索（Ctrl+Shift+H）')
+  assert.equal(close.props['aria-label'], '关闭历史检索')
   mounted.cleanup()
+})
+
+await test('用户可见文案统一为「历史检索」：源码非注释行无「话题地图」', () => {
+  const codeLines = src.split('\n').filter(line => {
+    const text = line.trim()
+    return !text.startsWith('//') && !text.startsWith('*') && !text.startsWith('/*')
+  })
+  assert.equal(codeLines.join('\n').includes('话题地图'), false)
+  assert.ok(src.includes("var HISTORY_TITLE = '历史检索'"))
 })
 
 await test('margin 连续 3 次被冲掉：降级覆盖模式、灰字说明、历史轨隐藏', async () => {

@@ -30,8 +30,8 @@ await test('解耦：不再引用 better-sidebar，也不注册 main 槽位', as
 
 await test('关闭态有右缘药丸入口，标题与 Ctrl+Shift+H 提示都在', async () => {
   assert.ok(src.includes("className: 'dsh_tm_drawerpill'"))
-  assert.ok(src.includes("title: '话题地图（Ctrl+Shift+H）'"))
-  assert.ok(src.includes("'aria-label': '打开话题地图'"))
+  assert.ok(src.includes("title: '历史检索'"))
+  assert.ok(src.includes("'aria-label': '历史检索'"))
   assert.ok(src.includes('DRAWER.setOpen(true)'))
 })
 

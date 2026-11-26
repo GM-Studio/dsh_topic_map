@@ -78,6 +78,9 @@ const COMPONENT_SOURCE = [
   extractFunction(src, 'categorySessionLockedBy'),
   extractFunction(src, 'categoryOverrideBody'),
   extractFunction(src, 'categoryErrorText'),
+  extractFunction(src, 'categoryAutoText'),
+  extractFunction(src, 'categoryAutoNoModel'),
+  extractFunction(src, 'categoryAutoUnclassified'),
   extractFunction(src, 'sessionTimeInfoOf'),
   extractFunction(src, 'requestTopicMap'),
   extractFunction(src, 'resolveWorkspaceIdForSession'),
@@ -91,6 +94,11 @@ async function mount(options = {}) {
     if (action === 'workspaces') return { value: [{ id: 'ws-1', sessionIds: SESSIONS.map(s => s.sessionId) }] }
     if (action === 'categories') return { value: { store, tree: [], lockedSessions: options.lockedSessions || {} } }
     if (action === 'sessions') return { value: { workspace: { id: 'ws-1' }, sessions: SESSIONS, total: SESSIONS.length } }
+    if (action === 'category-auto-start') return { value: { unclassified: SESSIONS.length } }
+    if (action === 'category-auto-status') {
+      if (options.autoStatus === 'no-model') return { value: { status: 'no-model' } }
+      return { value: { unclassified: options.autoUnclassified === undefined ? 12 : options.autoUnclassified } }
+    }
     return { ok: false, error: 'unexpected ' + action }
   })
   const selected = []
@@ -100,10 +108,12 @@ async function mount(options = {}) {
     'CategoriesTabBody',
     [
       'CATEGORY_ALL_ID', 'CATEGORY_ALL_NAME', 'CATEGORY_ROOT_ID', 'CATEGORY_ROOT_NAME',
+      'CATEGORY_AUTO_POLL_MS', 'CATEGORY_AUTO_POLL_MAX',
       'fetch', 'errorText', 'useTopicMapTheme', 'currentWorkspaceId',
     ],
     [
       ALL_ID, ALL_NAME, ROOT_ID, ROOT_NAME,
+      15000, 8,
       fake.fetch, error => String(error && error.message ? error.message : error),
       function () {}, () => Promise.resolve('ws-1'),
     ],
@@ -175,6 +185,84 @@ await test('选中态与过滤参数：全部 → ""，未归类 → __none__，
   selected.runtime.unmount()
 })
 
+await test('分类为 0 且有会话：触发 category-auto-start，并显示状态灰字', async () => {
+  const { runtime, fake } = await mount({ store: { version: 1, categories: [], assignments: {} } })
+  await runtime.settle()
+  const starts = fake.calls.filter(call => call.action === 'category-auto-start')
+  assert.equal(starts.length, 1, '只启动一次')
+  assert.deepEqual(starts[0].body, { workspaceId: 'ws-1' })
+  const auto = byClass(runtime.tree, 'dsh_tm_histcatauto')
+  assert.equal(auto.length, 1)
+  assert.equal(textOf(auto[0]), '正在归类 12 个会话…')
+  runtime.unmount()
+})
+
+await test('有分类时不触发自动归类', async () => {
+  const { runtime, fake } = await mount()
+  await runtime.settle()
+  assert.equal(fake.calls.filter(call => call.action === 'category-auto-start').length, 0)
+  assert.equal(byClass(runtime.tree, 'dsh_tm_histcatauto').length, 0)
+  runtime.unmount()
+})
+
+await test('状态 no-model：灰字提示未配置模型，不弹错误', async () => {
+  const { runtime } = await mount({
+    store: { version: 1, categories: [], assignments: {} },
+    autoStatus: 'no-model',
+  })
+  await runtime.settle()
+  const auto = byClass(runtime.tree, 'dsh_tm_histcatauto')
+  assert.equal(textOf(auto[0]), '未配置模型，无法自动归类')
+  assert.equal(byClass(runtime.tree, 'dsh_tm_histcaterr').length, 0)
+  runtime.unmount()
+})
+
+await test('自动归类轮询：最多 8 次，切工作区清理定时器', async () => {
+  const realSetTimeout = globalThis.setTimeout
+  const realClearTimeout = globalThis.clearTimeout
+  const timers = []
+  let nextId = 1
+  globalThis.setTimeout = (fn, ms) => {
+    const timer = { id: nextId++, fn, ms, cancelled: false }
+    timers.push(timer)
+    return timer.id
+  }
+  globalThis.clearTimeout = id => {
+    const timer = timers.find(item => item.id === id)
+    if (timer !== undefined) timer.cancelled = true
+  }
+  try {
+    const { runtime, fake } = await mount({ store: { version: 1, categories: [], assignments: {} } })
+    await runtime.settle()
+    assert.equal(fake.calls.filter(call => call.action === 'category-auto-status').length, 1)
+    for (let i = 0; i < 7; i += 1) {
+      const timer = timers.find(item => item.cancelled !== true)
+      assert.ok(timer !== undefined, '第 ' + (i + 1) + ' 次轮询定时器应存在')
+      timer.cancelled = true
+      timer.fn()
+      for (let k = 0; k < 12; k += 1) await Promise.resolve()
+      await runtime.settle()
+    }
+    assert.equal(fake.calls.filter(call => call.action === 'category-auto-status').length, 8, '最多 8 次')
+    assert.equal(timers.find(item => item.cancelled !== true), undefined, '第 8 次后不再排定时器')
+    runtime.unmount()
+
+    const second = await mount({ store: { version: 1, categories: [], assignments: {} } })
+    await second.runtime.settle()
+    const oldTimer = timers.find(item => item.cancelled !== true)
+    assert.ok(oldTimer !== undefined, '新工作区应先有轮询定时器')
+    second.runtime.props.sessionId = 's2'
+    second.runtime.renderOnce()
+    await second.runtime.runEffects()
+    await second.runtime.settle()
+    assert.equal(oldTimer.cancelled, true, '切工作区清掉旧定时器')
+    second.runtime.unmount()
+  } finally {
+    globalThis.setTimeout = realSetTimeout
+    globalThis.clearTimeout = realClearTimeout
+  }
+})
+
 await test('旧编辑按钮/调用全部不存在', async () => {
   const { runtime, tree } = await mount()
   await runtime.settle()
@@ -186,10 +274,12 @@ await test('旧编辑按钮/调用全部不存在', async () => {
   for (const marker of [
     'category-save', 'category-organize', 'category-undo',
     'category-apply-suggestions', 'data-category-edit',
-    '＋ 新建大类', '自动归类',
+    '＋ 新建大类',
   ]) {
     assert.equal(src.includes(marker), false, marker + ' 不应再调用/渲染')
   }
+  assert.ok(src.includes("requestTopicMap('category-auto-start'"))
+  assert.ok(src.includes("requestTopicMap('category-auto-status'"))
   assert.ok(src.includes("requestTopicMap('categories'"))
   assert.ok(src.includes("requestTopicMap('sessions'"))
   runtime.unmount()

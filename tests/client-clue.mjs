@@ -307,9 +307,9 @@ await test('历史 /search：全部不带 categoryId；分类浏览带空关键�
   }
   const abortRef = { current: null }
   const requestHistory = new Function(
-    'boundSessionId', 'HISTORY_SEARCH_LIMIT', 'page', 'pageSize', 'fetch', 'seqRef', 'abortRef', 'cancelHistorySearch',
+    'boundSessionId', 'HISTORY_SEARCH_LIMIT', 'page', 'pageSize', 'categoryData', 'fetch', 'seqRef', 'abortRef', 'cancelHistorySearch',
     `${extractFunction(src, 'requestHistory')};return requestHistory`,
-  )('s1', 30, 0, 10, fake.fetch, seqRef, abortRef, function () { state.seq += 1; abortRef.current = null })
+  )('s1', 30, 0, 10, { workspaceId: 'ws-1' }, fake.fetch, seqRef, abortRef, function () { state.seq += 1; abortRef.current = null })
 
   await requestHistory({ keywords: '索引', categoryId: '' })
   await requestHistory({ keywords: '', categoryId: '__none__' })
@@ -318,11 +318,13 @@ await test('历史 /search：全部不带 categoryId；分类浏览带空关键�
 
   assert.equal(fake.calls.length, 4)
   assert.equal(Object.prototype.hasOwnProperty.call(fake.calls[0].body, 'categoryId'), false, '全部不带 categoryId')
-  assert.deepEqual(fake.calls[0].body, { sessionId: 's1', keywords: '索引', offset: 0, limit: 10 })
+  assert.deepEqual(fake.calls[0].body, { sessionId: 's1', keywords: '索引', offset: 0, limit: 10, workspaceId: 'ws-1' })
   assert.equal(fake.calls[1].body.keywords, '', '分类浏览允许空关键词')
   assert.equal(fake.calls[1].body.categoryId, '__none__')
+  assert.equal(fake.calls[1].body.workspaceId, 'ws-1')
   assert.equal(fake.calls[2].body.categoryId, 'c1')
-  assert.deepEqual(fake.calls[3].body, { sessionId: 's1', keywords: '', offset: 0, limit: 10 }, '全部：空关键词且不带分类')
+  assert.equal(fake.calls[2].body.workspaceId, 'ws-1')
+  assert.deepEqual(fake.calls[3].body, { sessionId: 's1', keywords: '', offset: 0, limit: 10, workspaceId: 'ws-1' }, '全部：空关键词且不带分类')
 })
 
 finish()

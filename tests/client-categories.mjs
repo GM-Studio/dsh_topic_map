@@ -1,16 +1,13 @@
 /**
- * 分类 tab：树渲染与计数、归类请求参数、整理后的撤销、失败显示 Host 中文错误。
+ * 分类胶囊：只读过滤、最多 5 个 + 更多、排序、选中过滤、人工 override。
  *
- * 用 tests/client-harness.mjs 的微型 hooks 运行时**原样渲染** lib/client.js 里的
- * CategoriesTabBody；所有请求走假 fetch，验证发出去的 body 与真实端点契约一致。
+ * 旧的分类树编辑 UI 已删除；这里不再测试任何新建/改名/合并/整理/撤销。
  */
 
 import { strict as assert } from 'node:assert'
-import * as HITVIEW from '../lib/hit-view.js'
 import {
   readClient,
   extractFunction,
-  extractAssignment,
   renderComponent,
   makeFetch,
   makeRunner,
@@ -18,553 +15,203 @@ import {
   findAll,
   textOf,
   click,
-  change,
 } from './client-harness.mjs'
 
 const src = readClient()
-const RIGHT_TABS = new Function(
-  'HISTORY_ID', 'HISTORY_KIND', 'HISTORY_TITLE',
-  'CATEGORIES_ID', 'CATEGORIES_KIND', 'CATEGORIES_TITLE',
-  'CLUE_ID', 'CLUE_KIND', 'CLUE_TITLE',
-  'STATS_ID', 'STATS_KIND', 'STATS_TITLE',
-  'SETTINGS_ID', 'SETTINGS_KIND', 'SETTINGS_TITLE',
-  `var RIGHT_TABS = ${extractAssignment(src, 'RIGHT_TABS')};return RIGHT_TABS`,
-)(
-  'dsh-topic-map:history', 'topic-map-history', '历史',
-  'dsh-topic-map:categories', 'topic-map-categories', '分类',
-  'dsh-topic-map:clue', 'topic-map-clue', '线索',
-  'dsh-topic-map:stats', 'topic-map-stats', '统计',
-  'dsh-topic-map:settings', 'topic-map-settings', '设置',
-)
+const { test, finish } = makeRunner('client-categories')
 
-function constant(name, quote = "'") {
-  const escaped = quote === "'" ? "([^']*)" : '([^"]*)'
-  const found = src.match(new RegExp(`var ${name} = ${quote}${escaped}${quote}`))
+function constant(name) {
+  const found = src.match(new RegExp(`var ${name} = '([^']*)'`))
   if (found === null) throw new Error(`client.js 里找不到常量 ${name}`)
   return found[1]
 }
-
+const ALL_ID = constant('CATEGORY_ALL_ID')
+const ALL_NAME = constant('CATEGORY_ALL_NAME')
 const ROOT_ID = constant('CATEGORY_ROOT_ID')
 const ROOT_NAME = constant('CATEGORY_ROOT_NAME')
-const UNDO_MS = Number((src.match(/var CATEGORY_UNDO_MS = (\d+)/) || [])[1] || 3000)
 
-const { test, finish } = makeRunner('client-categories')
-
-const NOW = Date.now()
 const SESSIONS = [
-  { sessionId: 's1', title: '会话 A', turns: 4, lastActive: NOW - 60 * 60 * 1000 },
-  { sessionId: 's2', title: '会话 B', turns: 2, lastActive: NOW - 2 * 60 * 60 * 1000 },
-  { sessionId: 's3', title: '会话 C', turns: 7, lastActive: NOW - 3 * 60 * 60 * 1000 },
-  { sessionId: 's4', title: '会话 D', turns: 1, createdAt: NOW - 24 * 60 * 60 * 1000 },
-  { sessionId: 's5', title: '会话 E', turns: 3, lastActive: NOW - 30 * 60 * 1000 },
+  { sessionId: 's1', title: 'A', turns: 1, lastActive: 700000 },
+  { sessionId: 's2', title: 'B', turns: 2, lastActive: 1500000 },
+  { sessionId: 's3', title: 'C', turns: 2, lastActive: 1500000 },
+  { sessionId: 's4', title: 'D', turns: 3, lastActive: 1500000 },
+  { sessionId: 's5', title: 'E', turns: 2, lastActive: 2200000 },
+  { sessionId: 's6', title: 'F', turns: 1, lastActive: 500000 },
+  { sessionId: 's7', title: 'G', turns: 1, lastActive: 400000 },
+  { sessionId: 's8', title: 'H', turns: 1, lastActive: 300000 },
+  { sessionId: 's9', title: 'I', turns: 1, lastActive: 900000 },
 ]
 
-function fixtureStore() {
-  return {
-    version: 1,
-    categories: [
-      { id: 'c-a', name: '插件开发', parentId: null, source: 'user' },
-      { id: 'c-b', name: '界面', parentId: 'c-a', source: 'user' },
-      { id: 'c-c', name: '测试', parentId: null, source: 'user' },
-    ],
-    assignments: {
-      s1: { categoryId: 'c-a', source: 'user' },
-      s2: { categoryId: 'c-b', source: 'user' },
-      s3: { categoryId: 'c-a', source: 'user' },
-      s4: { categoryId: 'c-c', source: 'user' },
-    },
+function fixtureStore(options = {}) {
+  const categories = [
+    { id: 'c-zhaobiao', name: '招标', parentId: null },
+    { id: 'c-reader', name: '阅读器', parentId: null },
+    { id: 'c-map', name: '话题地图', parentId: null },
+    { id: 'c-plugin', name: '插件', parentId: null },
+    { id: 'c-test', name: '测试', parentId: null },
+    { id: 'c-other', name: '其它', parentId: null },
+    { id: 'c-reader-child', name: '阅读器子类', parentId: 'c-reader' },
+  ]
+  const assignments = {
+    s1: { categoryId: 'c-zhaobiao', source: 'model' },
+    s2: { categoryId: 'c-reader', source: 'user' },
+    s3: { categoryId: 'c-reader', source: 'user' },
+    s4: { categoryId: 'c-reader-child', source: 'model' },
+    s5: { categoryId: 'c-map', source: 'model' },
+    s6: { categoryId: 'c-plugin', source: 'model' },
+    s7: { categoryId: 'c-test', source: 'model' },
+    s8: { categoryId: 'c-other', source: 'model' },
   }
+  if (options.noUnclassified === true) assignments.s9 = { categoryId: 'c-other', source: 'model' }
+  return { version: 1, categories, assignments }
 }
 
 const COMPONENT_SOURCE = [
-  extractFunction(src, 'unrefTimer'),
+  extractFunction(src, 'categoryBodyOf'),
   extractFunction(src, 'categoryStoreOf'),
   extractFunction(src, 'categoryIdOfAssignment'),
   extractFunction(src, 'categoryAssignmentsOf'),
   extractFunction(src, 'categoryNameOf'),
   extractFunction(src, 'categoryTreeNodes'),
-  extractFunction(src, 'categoryFlatOptions'),
-  extractFunction(src, 'sessionTimeInfoOf'),
-  extractFunction(src, 'categorySessionMetaText'),
-  extractFunction(src, 'categorySessionRows'),
-  extractFunction(src, 'categoryBodyOf'),
-  extractFunction(src, 'categorySaveBody'),
-  extractFunction(src, 'categoryAssignBody'),
-  extractFunction(src, 'categoryOrganizeBody'),
-  extractFunction(src, 'categoryUndoBody'),
-  extractFunction(src, 'categoryMergeOp'),
+  extractFunction(src, 'categoryCapsuleModel'),
+  extractFunction(src, 'categorySessionLocked'),
+  extractFunction(src, 'categoryOverrideBody'),
   extractFunction(src, 'categoryErrorText'),
+  extractFunction(src, 'sessionTimeInfoOf'),
   extractFunction(src, 'requestTopicMap'),
   extractFunction(src, 'resolveWorkspaceIdForSession'),
   extractFunction(src, 'currentWorkspaceId'),
-  extractFunction(src, 'RightTabStrip'),
   extractFunction(src, 'CategoriesTabBody'),
 ].join('\n')
 
-const ERROR_TEXT = error => String(error && error.message ? error.message : error)
-
-function makeHandler(options = {}) {
-  let store = options.store === undefined ? fixtureStore() : options.store
-  const handler = ({ action, body }) => {
-    if (action === 'workspaces') {
-      return { value: [{ id: 'ws-1', title: '工作区', sessionIds: ['s1', 's2', 's3', 's4', 's5'] }] }
-    }
-    if (action === 'categories') {
-      if (options.categoriesError !== undefined) {
-        return { status: 502, ok: false, error: options.categoriesError }
-      }
-      return { value: { store: store, tree: [] } }
-    }
-    if (action === 'sessions') {
-      if (options.sessionsError !== undefined) {
-        return { status: 502, ok: false, error: options.sessionsError }
-      }
-      return { value: { workspace: { id: 'ws-1' }, sessions: SESSIONS, total: SESSIONS.length, hidden: 0 } }
-    }
-    if (action === 'category-save') {
-      if (options.saveError !== undefined) {
-        return { status: 400, ok: false, error: options.saveError }
-      }
-      if (typeof body.id === 'string' && body.id !== '') {
-        store.categories = store.categories.map(category => category.id === body.id
-          ? Object.assign({}, category, { name: body.name })
-          : category)
-      } else {
-        store.categories.push({
-          id: 'c-new-' + (store.categories.length + 1),
-          name: body.name,
-          parentId: body.parentId === undefined ? null : body.parentId,
-          source: 'user',
-        })
-      }
-      return { value: { store: store, tree: [], id: 'c-new' } }
-    }
-    if (action === 'category-assign') {
-      store.assignments = Object.assign({}, store.assignments)
-      if (body.categoryId === null) delete store.assignments[body.sessionId]
-      else store.assignments[body.sessionId] = { categoryId: body.categoryId, source: 'user' }
-      return { value: { store: store, tree: [] } }
-    }
-    if (action === 'category-organize') {
-      return {
-        value: {
-          store: store,
-          undo: { kind: 'plan', action: body.op && body.op.kind, summary: '合并 插件开发、测试 → 测试' },
-        },
-      }
-    }
-    if (action === 'category-undo') {
-      return { value: { store: store, tree: [] } }
-    }
-    if (action === 'category-suggest') {
-      if (options.suggestStatus !== undefined) {
-        return { status: options.suggestStatus, ok: false, error: options.suggestError || 'unknown action' }
-      }
-      return {
-        value: {
-          suggestions: options.suggestions === undefined ? [] : options.suggestions,
-          model: 'test-model',
-          elapsedMs: 12,
-        },
-      }
-    }
-    if (action === 'category-apply-suggestions') {
-      if (options.applyError !== undefined) {
-        return { status: 503, ok: false, error: options.applyError }
-      }
-      const patches = Array.isArray(body.suggestions) ? body.suggestions : []
-      for (const patch of patches) {
-        store.assignments = Object.assign({}, store.assignments, {
-          [patch.sessionId]: { categoryId: 'c-a', source: 'model' },
-        })
-      }
-      return { value: { store: store, tree: [], applied: patches.length, skipped: 0 } }
-    }
+async function mount(options = {}) {
+  const store = options.store === undefined ? fixtureStore() : options.store
+  const fake = makeFetch(({ action }) => {
+    if (action === 'workspaces') return { value: [{ id: 'ws-1', sessionIds: SESSIONS.map(s => s.sessionId) }] }
+    if (action === 'categories') return { value: { store, tree: [] } }
+    if (action === 'sessions') return { value: { workspace: { id: 'ws-1' }, sessions: SESSIONS, total: SESSIONS.length } }
     return { ok: false, error: 'unexpected ' + action }
-  }
-  return handler
-}
-
-async function mountCategories(handler) {
-  const fake = makeFetch(handler)
-  const opened = []
-  const runtime = await renderComponent(
-    COMPONENT_SOURCE,
-    'CategoriesTabBody',
-    [
-      'HITVIEW', 'RIGHT_TABS', 'CATEGORIES_KIND', 'CATEGORIES_TITLE',
-      'CATEGORY_ROOT_ID', 'CATEGORY_ROOT_NAME', 'CATEGORY_UNDO_MS',
-      'CATEGORY_ALL_ID', 'CATEGORY_ALL_NAME', 'CATEGORY_FOLD_PREFIX',
-      'fetch', 'errorText', 'useTopicMapTheme', 'openWorkspaceSession',
-    ],
-    [
-      HITVIEW, RIGHT_TABS, 'topic-map-categories', '分类',
-      ROOT_ID, ROOT_NAME, UNDO_MS,
-      '__all__', '全部', 'dsh.tm.category.folded.',
-      fake.fetch, ERROR_TEXT,
-      function () {},
-      function (sessionId) { opened.push(sessionId); return { ok: true } },
-    ],
-    { sessionId: 's1', openTab: function () {} },
-  )
-  return { runtime: runtime, tree: runtime.tree, calls: fake.calls, opened: opened }
-}
-
-function nodeRow(tree, catId) {
-  return findAll(tree, node =>
-    String(node.props.className || '').split(/\s+/).includes('dsh_tm_catnode')
-    && node.props['data-cat-id'] === catId)[0]
-}
-
-function nodeCount(tree, catId) {
-  const row = nodeRow(tree, catId)
-  if (row === undefined) return ''
-  return textOf(byClass(row, 'dsh_tm_catnodecount')[0])
-}
-
-function dialogOf(tree) {
-  return byClass(tree, 'dsh_tm_catdialog')[0]
-}
-
-function inDialog(tree, predicate) {
-  const dialog = dialogOf(tree)
-  return dialog === undefined ? undefined : findAll(dialog, predicate)[0]
-}
-
-await test('树渲染：根「未归类」+ 大类/子类，节点显示名称与会话数', async () => {
-  const { tree } = await mountCategories(makeHandler())
-  assert.equal(byClass(tree, 'dsh_tm_catnode').length, 4, '根 + 3 个分类节点')
-  assert.equal(nodeRow(tree, ROOT_ID).props['data-depth'], '0')
-  assert.ok(textOf(nodeRow(tree, ROOT_ID)).includes(ROOT_NAME))
-  assert.equal(nodeCount(tree, ROOT_ID), '1', 's5 未归类')
-  assert.equal(nodeCount(tree, 'c-a'), '2', 's1/s3 直接归到大类')
-  assert.equal(nodeCount(tree, 'c-b'), '1', 's2 归到子类')
-  assert.equal(nodeCount(tree, 'c-c'), '1')
-  assert.equal(nodeRow(tree, 'c-b').props['data-depth'], '1', '子类缩进/深度为 1')
-  assert.equal(byClass(tree, 'dsh_tm_catnode_on').length, 1)
-  assert.ok(textOf(byClass(tree, 'dsh_tm_catlisthead')[0]).includes(ROOT_NAME))
-})
-
-await test('点节点 → 右侧列表：标题 / 轮数 / 最后活动；未归类只列未归类会话', async () => {
-  const { runtime, tree } = await mountCategories(makeHandler())
-  click(nodeRow(tree, 'c-a'))
-  await runtime.settle()
-  const rows = byClass(runtime.tree, 'dsh_tm_catrow')
-  assert.deepEqual(byClass(runtime.tree, 'dsh_tm_catrowtitle').map(textOf), ['会话 A', '会话 C'])
-  assert.equal(rows.length, 2)
-  const meta = byClass(runtime.tree, 'dsh_tm_catrowmeta').map(textOf)
-  assert.equal(meta[0], '4 轮 · 最后活动 1 小时前')
-  assert.equal(meta[1], '7 轮 · 最后活动 3 小时前')
-
-  click(nodeRow(runtime.tree, ROOT_ID))
-  await runtime.settle()
-  assert.deepEqual(byClass(runtime.tree, 'dsh_tm_catrowtitle').map(textOf), ['会话 E'])
-  assert.equal(textOf(byClass(runtime.tree, 'dsh_tm_catrowmeta')[0]), '3 轮 · 最后活动 30 分钟前')
-})
-
-await test('点会话 → uiWorkspace.openSession；成功后给可见提示', async () => {
-  const { runtime, opened } = await mountCategories(makeHandler())
-  click(nodeRow(runtime.tree, 'c-a'))
-  await runtime.settle()
-  const main = findAll(runtime.tree, node =>
-    String(node.props.className || '').split(/\s+/).includes('dsh_tm_catrowmain')
-    && node.props['data-session-id'] === 's1')[0]
-  click(main)
-  await runtime.settle()
-  assert.deepEqual(opened, ['s1'])
-  assert.ok(textOf(byClass(runtime.tree, 'dsh_tm_catnotice')[0]).includes('已打开会话'))
-})
-
-await test('新建大类：POST /category-save {workspaceId, name}', async () => {
-  const { runtime, tree, calls } = await mountCategories(makeHandler())
-  click(findAll(tree, node => node.props['data-action'] === 'new-root')[0])
-  await runtime.settle()
-  const input = inDialog(runtime.tree, node => node.type === 'input')
-  assert.ok(input !== undefined, '必须出现名称输入框')
-  change(input, '  新分类  ')
-  await runtime.settle()
-  click(inDialog(runtime.tree, node => node.props['data-action'] === 'dialog-ok'))
-  await runtime.settle()
-  const saved = calls.filter(call => call.action === 'category-save')
-  assert.equal(saved.length, 1)
-  assert.deepEqual(saved[0].body, { workspaceId: 'ws-1', name: '新分类' })
-  assert.equal(dialogOf(runtime.tree), undefined, '成功后对话框收起')
-  assert.ok(textOf(byClass(runtime.tree, 'dsh_tm_catnotice')[0]).includes('已新建大类'))
-})
-
-await test('重命名与新建子类：id / parentId 参数正确', async () => {
-  const { runtime, calls } = await mountCategories(makeHandler())
-  click(findAll(runtime.tree, node => node.props['data-action'] === 'node-menu'
-    && node.props['data-cat-id'] === 'c-a')[0])
-  await runtime.settle()
-  click(findAll(runtime.tree, node => node.props['data-action'] === 'rename')[0])
-  await runtime.settle()
-  change(inDialog(runtime.tree, node => node.type === 'input'), '插件开发 2')
-  await runtime.settle()
-  click(inDialog(runtime.tree, node => node.props['data-action'] === 'dialog-ok'))
-  await runtime.settle()
-  let saves = calls.filter(call => call.action === 'category-save')
-  assert.deepEqual(saves[saves.length - 1].body, { workspaceId: 'ws-1', id: 'c-a', name: '插件开发 2' })
-
-  click(findAll(runtime.tree, node => node.props['data-action'] === 'node-menu'
-    && node.props['data-cat-id'] === 'c-a')[0])
-  await runtime.settle()
-  click(findAll(runtime.tree, node => node.props['data-action'] === 'new-child')[0])
-  await runtime.settle()
-  change(inDialog(runtime.tree, node => node.type === 'input'), '子类')
-  await runtime.settle()
-  click(inDialog(runtime.tree, node => node.props['data-action'] === 'dialog-ok'))
-  await runtime.settle()
-  saves = calls.filter(call => call.action === 'category-save')
-  assert.deepEqual(saves[saves.length - 1].body,
-    { workspaceId: 'ws-1', name: '子类', parentId: 'c-a' })
-})
-
-await test('会话行「移到分类…」：POST /category-assign {workspaceId, sessionId, categoryId}', async () => {
-  const { runtime, calls } = await mountCategories(makeHandler())
-  click(nodeRow(runtime.tree, 'c-a'))
-  await runtime.settle()
-  click(findAll(runtime.tree, node => node.props['data-action'] === 'row-menu'
-    && node.props['data-session-id'] === 's1')[0])
-  await runtime.settle()
-  click(findAll(runtime.tree, node => node.props['data-action'] === 'move-session')[0])
-  await runtime.settle()
-  const picker = inDialog(runtime.tree, node =>
-    String(node.props.className || '').split(/\s+/).includes('dsh_tm_catpick')
-    && node.props['data-cat-id'] === 'c-b')
-  assert.ok(picker !== undefined, '分类选择器必须列出可选分类')
-  click(picker)
-  await runtime.settle()
-  const assigned = calls.filter(call => call.action === 'category-assign')
-  assert.equal(assigned.length, 1)
-  assert.deepEqual(assigned[0].body, { workspaceId: 'ws-1', sessionId: 's1', categoryId: 'c-b' })
-})
-
-await test('删除走 /category-organize {kind:delete,id}（不使用原生 confirm）', async () => {
-  const { runtime, tree, calls } = await mountCategories(makeHandler())
-  click(findAll(tree, node => node.props['data-action'] === 'node-menu'
-    && node.props['data-cat-id'] === 'c-c')[0])
-  await runtime.settle()
-  click(findAll(runtime.tree, node => node.props['data-action'] === 'delete')[0])
-  await runtime.settle()
-  assert.ok(textOf(dialogOf(runtime.tree)).includes('删除「测试」后'))
-  click(inDialog(runtime.tree, node => node.props['data-action'] === 'dialog-ok'))
-  await runtime.settle()
-  const organized = calls.filter(call => call.action === 'category-organize')
-  assert.equal(organized.length, 1)
-  assert.deepEqual(organized[0].body, { workspaceId: 'ws-1', op: { kind: 'delete', id: 'c-c' } })
-  assert.equal(/window\.(confirm|alert)\(/.test(src), false, '不允许原生弹窗')
-})
-
-await test('合并：目标在前（Host targetId=ids[0]），成功后出现撤销按钮并可撤销', async () => {
-  const { runtime, calls } = await mountCategories(makeHandler())
-  click(findAll(runtime.tree, node => node.props['data-action'] === 'node-menu'
-    && node.props['data-cat-id'] === 'c-a')[0])
-  await runtime.settle()
-  click(findAll(runtime.tree, node => node.props['data-action'] === 'merge')[0])
-  await runtime.settle()
-  const target = inDialog(runtime.tree, node =>
-    String(node.props.className || '').split(/\s+/).includes('dsh_tm_catpick')
-    && node.props['data-cat-id'] === 'c-c')
-  assert.ok(target !== undefined)
-  click(target)
-  await runtime.settle()
-  const organized = calls.filter(call => call.action === 'category-organize')
-  assert.equal(organized.length, 1)
-  assert.deepEqual(organized[0].body, {
-    workspaceId: 'ws-1',
-    op: { kind: 'merge', ids: ['c-c', 'c-a'], name: '测试' },
   })
-  const undoButton = findAll(runtime.tree, node => node.props['data-action'] === 'undo')[0]
-  assert.ok(undoButton !== undefined, '每次整理后 3 秒内要有撤销按钮')
-  assert.ok(textOf(byClass(runtime.tree, 'dsh_tm_catundo')[0]).includes('合并'))
-
-  click(undoButton)
-  await runtime.settle()
-  const undone = calls.filter(call => call.action === 'category-undo')
-  assert.equal(undone.length, 1)
-  assert.deepEqual(undone[0].body, {
-    workspaceId: 'ws-1',
-    undo: { kind: 'plan', action: 'merge', summary: '合并 插件开发、测试 → 测试' },
-  })
-  assert.equal(findAll(runtime.tree, node => node.props['data-action'] === 'undo').length, 0,
-    '撤销成功后按钮消失')
-  assert.ok(textOf(byClass(runtime.tree, 'dsh_tm_catnotice')[0]).includes('已撤销整理'))
-})
-
-await test('失败：显示 Host 中文错误，对话框保留供修正', async () => {
-  const { runtime, tree } = await mountCategories(makeHandler({ saveError: '分类文件损坏' }))
-  click(findAll(tree, node => node.props['data-action'] === 'new-root')[0])
-  await runtime.settle()
-  change(inDialog(runtime.tree, node => node.type === 'input'), '新分类')
-  await runtime.settle()
-  click(inDialog(runtime.tree, node => node.props['data-action'] === 'dialog-ok'))
-  await runtime.settle()
-  const notice = byClass(runtime.tree, 'dsh_tm_catnotice')[0]
-  assert.ok(notice !== undefined)
-  assert.equal(textOf(notice), '保存分类失败：分类文件损坏')
-  assert.ok(dialogOf(runtime.tree) !== undefined, '失败时不能把用户输入关掉')
-})
-
-await test('读分类失败：可读错误 + 重试，不白屏', async () => {
-  const { runtime, tree } = await mountCategories(makeHandler({ categoriesError: '分类数据格式无法识别' }))
-  const errorBox = byClass(tree, 'dsh_tm_caterr')[0]
-  assert.ok(errorBox !== undefined)
-  assert.ok(textOf(errorBox).includes('读取分类失败：分类数据格式无法识别'))
-  const retry = findAll(tree, node =>
-    String(node.props.className || '').split(/\s+/).includes('dsh_tm_catretry'))[0]
-  assert.ok(retry !== undefined)
-  click(retry)
-  await runtime.settle()
-  assert.ok(byClass(runtime.tree, 'dsh_tm_caterr').length >= 1, '持续失败仍显示同一错误')
-})
-
-async function mountEmbedded(handlerOptions = {}) {
-  const handler = makeHandler(handlerOptions)
-  const fake = makeFetch(handler)
   const selected = []
-  let data = null
+  const data = []
   const runtime = await renderComponent(
     COMPONENT_SOURCE,
     'CategoriesTabBody',
     [
-      'HITVIEW', 'RIGHT_TABS', 'CATEGORIES_KIND', 'CATEGORIES_TITLE',
-      'CATEGORY_ROOT_ID', 'CATEGORY_ROOT_NAME', 'CATEGORY_UNDO_MS',
-      'CATEGORY_ALL_ID', 'CATEGORY_ALL_NAME', 'CATEGORY_FOLD_PREFIX',
-      'fetch', 'errorText', 'useTopicMapTheme', 'openWorkspaceSession',
+      'CATEGORY_ALL_ID', 'CATEGORY_ALL_NAME', 'CATEGORY_ROOT_ID', 'CATEGORY_ROOT_NAME',
+      'fetch', 'errorText', 'useTopicMapTheme', 'currentWorkspaceId',
     ],
     [
-      HITVIEW, RIGHT_TABS, 'topic-map-categories', '分类',
-      ROOT_ID, ROOT_NAME, UNDO_MS,
-      '__all__', '全部', 'dsh.tm.category.folded.',
-      fake.fetch, ERROR_TEXT,
-      function () {},
-      function () { return { ok: true } },
+      ALL_ID, ALL_NAME, ROOT_ID, ROOT_NAME,
+      fake.fetch, error => String(error && error.message ? error.message : error),
+      function () {}, () => Promise.resolve('ws-1'),
     ],
     {
-      sessionId: 's1',
       embedded: true,
-      selectedCategory: handlerOptions.selectedCategory === undefined ? '' : handlerOptions.selectedCategory,
-      onSelect: function (id) { selected.push(id) },
-      onData: function (value) { data = value },
+      sessionId: 's1',
+      selectedCategory: options.selectedCategory === undefined ? '' : options.selectedCategory,
+      onSelect: value => selected.push(value),
+      onData: value => data.push(value),
     },
   )
-  return { runtime: runtime, tree: runtime.tree, calls: fake.calls, selected: selected, data: function () { return data } }
+  return { runtime, tree: runtime.tree, fake, selected, data }
 }
 
-function itemById(tree, selector, id) {
-  return findAll(tree, node =>
-    String(node.props.className || '').split(/\s+/).includes(selector)
-    && node.props['data-cat-id'] === id)[0]
-}
+const pillNodes = tree => byClass(tree, 'dsh_tm_histcatpill')
+  .filter(node => !String(node.props.className || '').includes('_more'))
+const pillTexts = tree => pillNodes(tree).map(textOf)
 
-await test('历史页分类树：固定「全部 / 未归类」+ 节点点击回传过滤 id', async () => {
-  const { tree, selected, data } = await mountEmbedded()
-  assert.equal(itemById(tree, 'dsh_tm_catnode', '__all__') !== undefined, true)
-  assert.equal(itemById(tree, 'dsh_tm_catnode', ROOT_ID) !== undefined, true)
-  assert.ok(textOf(itemById(tree, 'dsh_tm_catnode', '__all__')).includes('全部'))
-  assert.ok(textOf(itemById(tree, 'dsh_tm_catnode', ROOT_ID)).includes('未归类'))
-
-  click(itemById(tree, 'dsh_tm_catnode', 'c-a'))
-  click(itemById(tree, 'dsh_tm_catnode', ROOT_ID))
-  assert.deepEqual(selected, ['c-a', '__none__'], '未归类必须回传 __none__，全部回传空串')
-  assert.ok(data() !== null && data().store !== null, '分类树数据要交给历史页做会话列表降级')
-  assert.equal(findAll(tree, node => node.props['data-action'] === 'new-root').length, 1)
-  assert.equal(findAll(tree, node => node.props['data-action'] === 'auto-categorize').length, 1)
+await test('胶囊最多 5 个 + 更多；全部最左，未归类第二，按会话数×最近活动排序', async () => {
+  const { runtime, tree } = await mount()
+  await runtime.settle()
+  assert.deepEqual(pillTexts(runtime.tree), [ALL_NAME, ROOT_NAME, '阅读器', '话题地图', '招标'])
+  assert.equal(pillNodes(runtime.tree).length, 5)
+  const more = byClass(runtime.tree, 'dsh_tm_histcatpill').find(node => textOf(node).includes('更多'))
+  assert.ok(more !== undefined, '第 6 项起必须有「更多」')
+  assert.ok(pillTexts(runtime.tree).length + 1 <= 6, '5 个胶囊 + 更多，共 6 个')
+  click(more)
+  await runtime.settle()
+  const rest = byClass(runtime.tree, 'dsh_tm_histcatmoreitem').map(textOf)
+  assert.deepEqual(rest, ['插件1', '测试1', '其它1'])
+  runtime.unmount()
 })
 
-await test('历史页分类树：最多 3 级，第 3 级菜单禁用新建子类；折叠按工作区记忆', async () => {
+await test('子孙会话计入顶层胶囊；未归类只在有未归类会话时出现', async () => {
+  const withRoot = await mount()
+  await withRoot.runtime.settle()
+  const reader = pillNodes(withRoot.runtime.tree).find(node => textOf(node) === '阅读器')
+  assert.ok(String(reader.props.title).includes('3 个会话'), '阅读器含子类会话，共 3 个')
+  const root = pillNodes(withRoot.runtime.tree).find(node => textOf(node) === ROOT_NAME)
+  assert.ok(String(root.props.title).includes('1 个会话'))
+  withRoot.runtime.unmount()
+
+  const noRoot = await mount({ store: fixtureStore({ noUnclassified: true }) })
+  await noRoot.runtime.settle()
+  assert.equal(pillTexts(noRoot.runtime.tree).includes(ROOT_NAME), false)
+  noRoot.runtime.unmount()
+})
+
+await test('选中态与过滤参数：全部 → ""，未归类 → __none__，分类 → 分类 id', async () => {
+  const selected = await mount({ selectedCategory: 'c-reader' })
+  await selected.runtime.settle()
+  const reader = pillNodes(selected.runtime.tree).find(node => node.props['data-cat-id'] === 'c-reader')
+  assert.equal(reader.props['aria-pressed'], 'true')
+  assert.equal(reader.props.className.includes('dsh_tm_histcatpill_on'), true)
+
+  click(pillNodes(selected.runtime.tree)[0])
+  click(pillNodes(selected.runtime.tree)[1])
+  click(reader)
+  await selected.runtime.settle()
+  assert.deepEqual(selected.selected, ['', '__none__', 'c-reader'])
+  selected.runtime.unmount()
+})
+
+await test('旧编辑按钮/调用全部不存在', async () => {
+  const { runtime, tree } = await mount()
+  await runtime.settle()
+  for (const action of ['new-root', 'auto-categorize', 'node-menu', 'row-menu', 'undo', 'dialog-ok']) {
+    const found = findAll(tree, node => node.props !== undefined
+      && node.props['data-action'] === action)
+    assert.equal(found.length, 0, action + ' 不应存在')
+  }
+  for (const marker of [
+    'category-save', 'category-organize', 'category-undo',
+    'category-apply-suggestions', 'data-category-edit',
+    '＋ 新建大类', '自动归类',
+  ]) {
+    assert.equal(src.includes(marker), false, marker + ' 不应再调用/渲染')
+  }
+  assert.ok(src.includes("requestTopicMap('categories'"))
+  assert.ok(src.includes("requestTopicMap('sessions'"))
+  runtime.unmount()
+})
+
+await test('归错了：只列已有分类 + 未归类；override 请求参数正确；user 来源视为锁定', async () => {
+  assert.ok(src.includes("requestTopicMap('category-override'"))
+  assert.equal(src.includes("requestTopicMap('category-assign'"), false)
+  const start = src.indexOf('function renderOverrideDialog')
+  const component = src.slice(start, src.indexOf('// ── 正文', start))
+  assert.equal(component.includes('<input'), false, '选择器不允许输入新名字')
+  assert.ok(component.includes('选择已有分类（不能新建）'))
+
+  const lockedFn = new Function(
+    `${extractFunction(src, 'categoryStoreOf')};${extractFunction(src, 'categorySessionLocked')};return categorySessionLocked`,
+  )()
+  const bodyFn = new Function(
+    `${extractFunction(src, 'categoryBodyOf')};${extractFunction(src, 'categoryOverrideBody')};return categoryOverrideBody`,
+  )()
   const store = fixtureStore()
-  store.categories.push(
-    { id: 'c-d', name: '三级', parentId: 'c-b', source: 'user' },
-    { id: 'c-e', name: '四级', parentId: 'c-d', source: 'user' },
-  )
-  const memory = new Map()
-  const previous = globalThis.localStorage
-  globalThis.localStorage = {
-    getItem(key) { return memory.has(key) ? memory.get(key) : null },
-    setItem(key, value) { memory.set(key, String(value)) },
-  }
-  try {
-    const { runtime, tree } = await mountEmbedded({ store: store })
-    assert.equal(itemById(tree, 'dsh_tm_catnode', 'c-d') !== undefined, true, '第 3 级要显示')
-    assert.equal(itemById(tree, 'dsh_tm_catnode', 'c-e'), undefined, '第 4 级不显示')
+  assert.equal(lockedFn(store, 's2'), true, 'source=user 必须显示锁')
+  assert.equal(lockedFn(store, 's1'), false)
+  assert.deepEqual(bodyFn('ws-1', 's1', null), { workspaceId: 'ws-1', sessionId: 's1', categoryId: null })
+  assert.deepEqual(bodyFn('ws-1', 's1', 'c-reader'), { workspaceId: 'ws-1', sessionId: 's1', categoryId: 'c-reader' })
 
-    const more = findAll(tree, node =>
-      node.props['data-cat-id'] === 'c-d' && node.props['data-action'] === 'node-menu')[0]
-    click(more)
-    await runtime.settle()
-    const childItem = findAll(runtime.tree, node => node.props['data-action'] === 'new-child')[0]
-    assert.ok(childItem !== undefined)
-    assert.equal(childItem.props.disabled, true, '第 3 级不能再建子类')
-    assert.ok(String(childItem.props.title).includes('分类最多 3 级'))
-
-    const fold = findAll(tree, node =>
-      node.props['data-cat-id'] === 'c-a' && node.props['data-action'] === 'fold')[0]
-    click(fold)
-    await runtime.settle()
-    assert.equal(itemById(runtime.tree, 'dsh_tm_catnode', 'c-b'), undefined, '折叠后子类不渲染')
-    assert.equal(memory.get('dsh.tm.category.folded.ws-1'), '["c-a"]', '折叠状态按工作区写 localStorage')
-  } finally {
-    if (previous === undefined) delete globalThis.localStorage
-    else globalThis.localStorage = previous
-  }
-})
-
-await test('自动归类：预览按 confidence 排序、可取消勾选、应用后刷新并给可撤销提示', async () => {
-  const suggestions = [
-    { sessionId: 's5', sessionTitle: '会话 E', categoryPath: ['插件开发', '界面'], confidence: 0.4 },
-    { sessionId: 's1', sessionTitle: '会话 A（已归类）', categoryPath: ['插件开发'], confidence: 0.99 },
-    { sessionId: 's6', sessionTitle: '会话 F', categoryPath: ['测试'], confidence: 0.9 },
-  ]
-  const { runtime, tree, calls } = await mountEmbedded({ suggestions: suggestions })
-  click(findAll(tree, node => node.props['data-action'] === 'auto-categorize')[0])
-  await runtime.settle()
-
-  const rows = byClass(runtime.tree, 'dsh_tm_catsuggestrow')
-  assert.equal(rows.length, 2, '已归类的 s1 不进预览')
-  assert.ok(textOf(rows[0]).includes('会话 F'), '按 confidence 降序')
-  assert.ok(textOf(rows[1]).includes('会话 E'))
-
-  // 取消第一条（s6），只应用 s5。
-  change(findAll(rows[0], node => node.type === 'input')[0], false)
-  await runtime.settle()
-  const apply = findAll(runtime.tree, node => node.props['data-action'] === 'apply-suggestions')[0]
-  assert.ok(textOf(apply).includes('应用 1 条'))
-  click(apply)
-  await runtime.settle()
-
-  const applied = calls.filter(call => call.action === 'category-apply-suggestions')
-  assert.equal(applied.length, 1)
-  assert.equal(applied[0].body.workspaceId, 'ws-1')
-  assert.deepEqual(applied[0].body.suggestions.map(item => item.sessionId), ['s5'])
-  const notice = byClass(runtime.tree, 'dsh_tm_histcatnotice')[0]
-  assert.ok(textOf(notice).includes('已归类 1 个会话（可撤销）'))
-  assert.equal(nodeCount(runtime.tree, 'c-a'), '3', '应用后树节点计数按新 store 更新')
-  assert.equal(nodeCount(runtime.tree, ROOT_ID), '0', '未归类会话数同步减少')
-  const refreshCalls = calls.filter(call => call.action === 'categories' || call.action === 'sessions')
-  const afterApply = refreshCalls.slice(refreshCalls.length - 2)
-  assert.deepEqual(afterApply.map(call => call.action), ['categories', 'sessions'], '先分类后会话，串行刷新')
-  assert.ok(afterApply.every(call => call.body.workspaceId === 'ws-1'), '刷新必须锁在应用时的工作区')
-  assert.equal(findAll(runtime.tree, node => String(node.props.className || '').includes('dsh_tm_histcatundo')).length, 1)
-
-  click(findAll(runtime.tree, node => String(node.props.className || '').includes('dsh_tm_histcatundo'))[0])
-  await runtime.settle()
-  const undone = calls.filter(call => call.action === 'category-assign')
-  assert.equal(undone.length, 1)
-  assert.equal(undone[0].body.categoryId, null)
-})
-
-await test('自动归类：404 显示「自动归类暂不可用」，其它失败显示 Host 中文错误', async () => {
-  const unavailable = await mountEmbedded({ suggestStatus: 404, suggestError: 'unknown action' })
-  click(findAll(unavailable.tree, node => node.props['data-action'] === 'auto-categorize')[0])
-  await unavailable.runtime.settle()
-  assert.ok(textOf(byClass(unavailable.runtime.tree, 'dsh_tm_histcatnotice')[0]).includes('自动归类暂不可用'))
-
-  const failed = await mountEmbedded({ suggestStatus: 503, suggestError: '自动归类需要先配置模型' })
-  click(findAll(failed.tree, node => node.props['data-action'] === 'auto-categorize')[0])
-  await failed.runtime.settle()
-  assert.ok(textOf(byClass(failed.runtime.tree, 'dsh_tm_histcatnotice')[0]).includes('自动归类需要先配置模型'))
+  assert.ok(src.includes("'dsh_tm_histlock'"))
+  assert.ok(src.includes('已人工指定，模型不会覆盖'))
+  assert.ok(src.includes("'归错了…'"))
+  assert.ok(src.includes("'override-category'"))
+  assert.ok(src.includes('已改为「'))
+  assert.ok(src.includes('模型不会再动这个会话'))
 })
 
 finish()

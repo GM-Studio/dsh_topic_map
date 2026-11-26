@@ -224,14 +224,15 @@ await test('视口 < 760 默认关闭；打开后强制覆盖，不推挤对话�
   mounted.cleanup()
 })
 
-await test('布局断点写在 CSS：560 并排 / 420–560 顶部行 / <420 单列与设置纵排', async () => {
+await test('布局：分类胶囊横向滚动，<420 单列与设置纵排', async () => {
   assert.ok(src.includes('container-name:tm-drawer'))
-  assert.ok(src.includes('@container tm-drawer (max-width:559px)'))
-  assert.ok(src.includes('@container tm-drawer (min-width:560px)'))
   assert.ok(src.includes('@container tm-drawer (max-width:419px)'))
   assert.ok(src.includes('grid-template-columns:1fr'))
-  assert.ok(src.includes('dsh_tm_histcatbar'))
-  assert.ok(src.includes('dsh_tm_histcatpop'))
+  assert.ok(src.includes('.dsh_tm_histcatpills'))
+  assert.ok(src.includes('overflow-x:auto'))
+  assert.ok(src.includes('white-space:nowrap'))
+  assert.equal(src.includes('dsh_tm_histcatbar'), false, '旧分类栏已删除')
+  assert.equal(src.includes('dsh_tm_histcatpop'), false, '旧分类浮层已删除')
 })
 
 finish()

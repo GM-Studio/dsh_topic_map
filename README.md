@@ -267,6 +267,7 @@ node scripts/test-all.mjs         # 全量测试汇总（同时检查退出码�
 - [ADR-0010](<docs/adr/0010-semantic-refinement-reliability-and-visibility.md>) — 语义提炼的可靠性与可见性：绝不静默降级
 - [接口契约](<docs/contracts/resume-v2-interfaces.md>) — 事续接 v2 的模块签名与字段定义（ADR-0006~0010 的实现依据）
 - [改造前基线](<docs/audits/resume-v2-baseline.md>) — 动手前的真机量化证据与复现命令
+- [变更归档：事续接 v2](<openspec/changes/archive/2026-11-27-resume-v2/archive.md>) — ADR-0006~0012 的交付范围、提交映射与验收证据
 - 早期历史索引阶段设计存档位于 `openspec/changes/history-index/`（供查阅底座演进背景）
 
 ---

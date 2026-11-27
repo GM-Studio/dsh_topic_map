@@ -2,7 +2,7 @@
  * 工作区切区状态机与空态测试（ADR-0008）。
  * 运行：node tests/workspace-switch.mjs
  */
-import { resolveWorksViewState, emptyStateText } from '../lib/work-view.js'
+import { resolveWorksViewState, emptyStateText, workBoardModel } from '../lib/work-view.js'
 
 let passed = 0
 const failures = []
@@ -92,5 +92,31 @@ check('键壮性：异常输入不抛异常', () => {
   ok(typeof emptyStateText(null, null).title === 'string', 'null 参数有兜底文案')
 })
 
+// ── 四态空态接进 workBoardModel（渲染层）────────────────────────────
+check('渲染层：读取失败 → failed 且带重试入口（不是「无事」）', () => {
+  const b = workBoardModel({ cards: [], settled: [], error: '连接超时' }, { now: 1700000000000 })
+  eq(b.empty.kind, 'failed', 'kind')
+  eq(b.empty.action.id, 'retry_scan', 'action 应为重试')
+  ok(b.empty.description.indexOf('连接超时') >= 0, '失败原因要写在文案里')
+})
+
+check('渲染层：从未扫描 → unscanned 且带开始盘点入口', () => {
+  const b = workBoardModel({ cards: [], settled: [], initialized: false }, { now: 1700000000000 })
+  eq(b.empty.kind, 'unscanned', 'kind')
+  eq(b.empty.action.id, 'start_scan', 'action 应为开始盘点')
+})
+
+check('渲染层：四种空态的 (kind,title) 两两不同', () => {
+  const mk = extra => workBoardModel({ cards: [], settled: [], ...extra }, { now: 1700000000000 }).empty
+  const kinds = [mk({ error: 'x' }).kind, mk({ initialized: false }).kind, mk({ coldStarting: true }).kind, mk({ initialized: true }).kind]
+  eq(new Set(kinds).size, 4, '四种 kind 必须互不相同，实际 ' + JSON.stringify(kinds))
+  const titles = [mk({ error: 'x' }).title, mk({ initialized: false }).title, mk({ coldStarting: true }).title, mk({ initialized: true }).title]
+  eq(new Set(titles).size, 4, '四种标题必须互不相同')
+})
+
+check('渲染层：有卡片时不产生空态（不能误挡真实内容）', () => {
+  const b = workBoardModel({ unresolved: [{ id: 'w-1', title: 'T', state: 'active' }], settled: [], error: 'x' }, { now: 1700000000000 })
+  eq(b.empty, null, 'empty 应为 null')
+})
 console.log('workspace-switch: ' + passed + ' passed, ' + failures.length + ' failed')
 if (failures.length > 0) { for (const f of failures) console.log('  ✗ ' + f); process.exit(1) }

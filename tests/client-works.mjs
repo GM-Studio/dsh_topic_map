@@ -286,6 +286,7 @@ async function mountWorks(options) {
     {
       sessionId: 'session-abcdef12',
       openTab: kind => { openedTabs.push(kind) },
+      readonly: opts.readonly === true,
     },
   )
 
@@ -823,6 +824,54 @@ await test('历史轨两级目录：标准/宽档渲染段头且点段头跳首�
   assert.equal(doc.querySelectorAll('.dsh_tm_railseg').length, 2, 'max 宽档恢复段头')
 
   dispose()
+})
+
+await test('只读巡检：卡片上的写按钮全部禁用，交接两个保持可用，并给出说明条', async () => {
+  const { runtime } = await mountWorks({ readonly: true })
+  await runtime.settle()
+
+  // 说明条必须就近出现在卡片区，否则整片灰按钮会让人以为功能坏了。
+  assert.equal(byData(runtime.tree, 'data-banner', 'readonly').length, 1, '只读说明条必须出现')
+
+  const WRITE = ['save-nextstep', 'toggle-pin', 'mark-blocked', 'dismiss-work', 'reopen',
+    'review-keep', 'review-done', 'review-dismiss', 'confirm-done', 'open-review', 'confirm-all-review']
+  for (const action of WRITE) {
+    for (const node of byData(runtime.tree, 'data-action', action)) {
+      assert.equal(node.props.disabled, true, '只读区 ' + action + ' 必须禁用')
+    }
+  }
+
+  // 交接的两种形态是 ADR-0011 的唯一例外，必须仍可点。
+  for (const action of ['resume', 'handoff']) {
+    const nodes = byData(runtime.tree, 'data-action', action)
+    assert.ok(nodes.length > 0, '应存在 ' + action + ' 按钮')
+    for (const node of nodes) {
+      assert.notEqual(node.props.disabled, true, '只读区 ' + action + ' 必须保持可用（交接是唯一例外）')
+    }
+  }
+
+  runtime.unmount()
+})
+
+await test('只读巡检：读操作不受影响（详情仍可展开）', async () => {
+  const { runtime } = await mountWorks({ readonly: true })
+  await runtime.settle()
+  const expandNodes = byData(runtime.tree, 'data-action', 'expand')
+  assert.ok(expandNodes.length > 0, '详情按钮必须存在')
+  for (const node of expandNodes) {
+    assert.notEqual(node.props.disabled, true, '只读区的「详情」是读操作，不得禁用')
+  }
+  runtime.unmount()
+})
+
+await test('非只读区不出现只读说明条，写按钮照常可用', async () => {
+  const { runtime } = await mountWorks()
+  await runtime.settle()
+  assert.equal(byData(runtime.tree, 'data-banner', 'readonly').length, 0, '本区不该有只读条')
+  for (const node of byData(runtime.tree, 'data-action', 'confirm-done')) {
+    assert.notEqual(node.props.disabled, true, '本区写按钮必须可用')
+  }
+  runtime.unmount()
 })
 
 finish()

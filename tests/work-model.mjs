@@ -628,6 +628,7 @@ test('异常/空输入边界不抛错（mergeWorks 自合并、不存在 id、�
   assert.deepEqual(projectResumeCards(null, { now: T0 }), {
     unresolved: [],
     settled: [],
+    excluded: [],
     settledCollapsedByDefault: true,
     pendingReviewCount: 0,
   })
@@ -645,6 +646,195 @@ test('projectResumeCards：pendingReviewCount 绝不把已沉降(shelved)/已完
   assert.equal(view.unresolved.length, 1)
   assert.equal(view.settled.length, 2)
   assert.equal(view.pendingReviewCount, 0, '未收束全为 reviewed 时待核对数应为 0，即使已收束里仍有 pending')
+})
+
+// ── ADR-0006 / 0009：准入、待确认与下一步来源字段 ────────────────────
+
+test('契约新增字段默认值：未提供的旧 store 取安全默认', () => {
+  const w = createWork({ id: 'w-legacy', workspaceId: 'ws-1', title: '旧记录', state: 'active' }, T0)
+  assert.deepEqual(w.admission, { admitted: true, reasons: [], kind: 'work' })
+  assert.equal(w.awaiting, null)
+  assert.equal(w.nextStepKind, '')
+  assert.equal(w.nextStepSource, 'inferred')
+})
+
+test('admission / awaiting / nextStepKind 被规范化并去重原因', () => {
+  const w = createWork({
+    id: 'w-adm',
+    workspaceId: 'ws-1',
+    title: '问个概念',
+    state: 'active',
+    admission: { admitted: false, reasons: ['no_intent', 'no_intent', '', 42], kind: 'chat' },
+    awaiting: { active: true, summary: '  这个改动要不要一起提交？  ', turn: 20 },
+    nextStep: '回复第 20 轮的确认项',
+    nextStepKind: 'awaiting',
+  }, T0)
+  assert.deepEqual(w.admission, { admitted: false, reasons: ['no_intent'], kind: 'chat' })
+  assert.deepEqual(w.awaiting, { active: true, summary: '这个改动要不要一起提交？', turn: 20 })
+  assert.equal(w.nextStepKind, 'awaiting')
+})
+
+test('非法枚举值回落：kind 非 work/chat、nextStepKind 非四类、awaiting 非对象', () => {
+  const w = createWork({
+    id: 'w-bad',
+    workspaceId: 'ws-1',
+    title: '脏数据',
+    admission: { admitted: 'nope', reasons: 'nope', kind: 'bogus' },
+    awaiting: 'nope',
+    nextStepKind: 'bogus',
+  }, T0)
+  assert.deepEqual(w.admission, { admitted: true, reasons: [], kind: 'work' })
+  assert.equal(w.awaiting, null)
+  assert.equal(w.nextStepKind, '')
+})
+
+test('awaiting.active 为 false 或摘要为空时一律归 null（不产半截记录）', () => {
+  const off = createWork({ id: 'w-a1', workspaceId: 'ws-1', title: 'a', awaiting: { active: false, summary: 'x', turn: 1 } }, T0)
+  assert.equal(off.awaiting, null)
+  const blank = createWork({ id: 'w-a2', workspaceId: 'ws-1', title: 'b', awaiting: { active: true, summary: '   ', turn: 2 } }, T0)
+  assert.equal(blank.awaiting, null)
+})
+
+test('awaiting.turn 缺失或非法时为 null，不编造轮号', () => {
+  const w = createWork({ id: 'w-a3', workspaceId: 'ws-1', title: 'c', awaiting: { active: true, summary: '要不要提交？' } }, T0)
+  assert.equal(w.awaiting.turn, null)
+  const bad = createWork({ id: 'w-a4', workspaceId: 'ws-1', title: 'd', awaiting: { active: true, summary: '要不要提交？', turn: 'x' } }, T0)
+  assert.equal(bad.awaiting.turn, null)
+})
+
+test('admitted 为 false 但没给合法原因时，reasons 留空而不自造合同外的取值', () => {
+  const w = createWork({
+    id: 'w-nr',
+    workspaceId: 'ws-1',
+    title: '未准入无原因',
+    admission: { admitted: false, reasons: [42, '', '  '], kind: 'chat' },
+  }, T0)
+  assert.deepEqual(w.admission.reasons, [])
+  assert.equal(w.admission.admitted, false)
+  assert.equal(w.admission.kind, 'chat')
+})
+
+test('awaiting.turn 必须为正整数（0 与负数归 null）', () => {
+  const zero = createWork({ id: 'w-a5', workspaceId: 'ws-1', title: 'e', awaiting: { active: true, summary: '要不要提交？', turn: 0 } }, T0)
+  assert.equal(zero.awaiting.turn, null)
+})
+
+test('applyUserConfirm 保留准入与待确认字段，且不因确认改动 admitted', () => {
+  const w = createWork({
+    id: 'w-conf',
+    workspaceId: 'ws-1',
+    title: '问个概念',
+    state: 'active',
+    admission: { admitted: false, reasons: ['no_intent'], kind: 'chat' },
+    awaiting: { active: true, summary: '要不要提交？', turn: 3 },
+    nextStepKind: 'awaiting',
+    nextStep: '回复第 3 轮的确认项',
+  }, T0)
+  const store = applyUserConfirm(makeStoreWithWorks([w]), 'w-conf', { state: 'done' }, T0 + HOUR)
+  const confirmed = store.works.find(x => x.id === 'w-conf')
+  assert.equal(confirmed.state, 'done')
+  assert.equal(confirmed.stateSource, 'confirmed')
+  assert.deepEqual(confirmed.admission, { admitted: false, reasons: ['no_intent'], kind: 'chat' })
+  assert.deepEqual(confirmed.awaiting, { active: true, summary: '要不要提交？', turn: 3 })
+  assert.equal(confirmed.nextStepKind, 'awaiting')
+})
+
+test('toCardView 透出准入、待确认与下一步来源字段', () => {
+  const w = createWork({
+    id: 'w-cv',
+    workspaceId: 'ws-1',
+    title: '等确认',
+    state: 'active',
+    admission: { admitted: true, reasons: [], kind: 'work' },
+    awaiting: { active: true, summary: '这个改动要不要一起提交？', turn: 20 },
+    nextStep: '回复第 20 轮的确认项',
+    nextStepSource: 'inferred',
+    nextStepKind: 'awaiting',
+  }, T0)
+  const store = deepFreeze(makeStoreWithWorks([w]))
+  const card = projectResumeCards(store, { now: T0 + HOUR }).unresolved.find(c => c.id === 'w-cv')
+  assert.ok(card !== undefined)
+  assert.equal(card.admitted, true)
+  assert.deepEqual(card.admissionReasons, [])
+  assert.equal(card.awaitingActive, true)
+  assert.equal(card.awaitingSummary, '这个改动要不要一起提交？')
+  assert.equal(card.awaitingTurn, 20)
+  assert.equal(card.nextStepKind, 'awaiting')
+  assert.equal(card.nextStepSource, 'inferred')
+})
+
+test('toCardView 默认值：未准入且无待确认时仍给出完整可读字段', () => {
+  const w = createWork({ id: 'w-plain', workspaceId: 'ws-1', title: '普通事', state: 'active' }, T0)
+  const store = deepFreeze(makeStoreWithWorks([w]))
+  const card = projectResumeCards(store, { now: T0 + HOUR }).unresolved.find(c => c.id === 'w-plain')
+  assert.equal(card.admitted, true)
+  assert.deepEqual(card.admissionReasons, [])
+  assert.equal(card.awaitingActive, false)
+  assert.equal(card.awaitingSummary, '')
+  assert.equal(card.awaitingTurn, null)
+  assert.equal(card.nextStepKind, '')
+  assert.equal(card.nextStepSource, 'inferred')
+})
+
+test('未准入的事移出 unresolved，进入 excluded 且带 reasons', () => {
+  const admitted = createWork({ id: 'w-a', workspaceId: 'ws-1', title: '在推的事', state: 'active', lastActivityAt: T0 }, T0)
+  const chat = createWork({
+    id: 'w-b',
+    workspaceId: 'ws-1',
+    title: '问个概念',
+    state: 'active',
+    lastActivityAt: T0 + 5000,
+    admission: { admitted: false, reasons: ['no_intent'], kind: 'chat' },
+  }, T0)
+  const blocked = createWork({ id: 'w-c', workspaceId: 'ws-1', title: '阻塞中', state: 'blocked', lastActivityAt: T0 + 9000 }, T0)
+  const store = deepFreeze(makeStoreWithWorks([admitted, chat, blocked]))
+  const view = projectResumeCards(store, { now: T0 + HOUR })
+
+  assert.deepEqual(view.unresolved.map(c => c.id), ['w-c', 'w-a'])
+  assert.deepEqual(view.excluded.map(c => c.id), ['w-b'])
+  assert.deepEqual(view.excluded[0].reasons, ['no_intent'])
+  assert.equal(view.excluded[0].kind, 'chat')
+  assert.equal(view.excluded[0].title, '问个概念')
+})
+
+test('excluded 不参与 pendingReviewCount，也不进 settled', () => {
+  const chat = createWork({
+    id: 'w-x',
+    workspaceId: 'ws-1',
+    title: '闲聊',
+    state: 'active',
+    reviewStatus: 'pending',
+    admission: { admitted: false, reasons: ['no_intent'], kind: 'chat' },
+  }, T0)
+  const store = deepFreeze(makeStoreWithWorks([chat]))
+  const view = projectResumeCards(store, { now: T0 + HOUR })
+  assert.equal(view.unresolved.length, 0)
+  assert.equal(view.settled.length, 0)
+  assert.equal(view.excluded.length, 1)
+  assert.equal(view.pendingReviewCount, 0)
+})
+
+test('excluded 同样排除 dismissedAsChat 的事（防重提铁律优先）', () => {
+  const chat = createWork({
+    id: 'w-dismissed',
+    workspaceId: 'ws-1',
+    title: '已判定为闲聊',
+    state: 'active',
+    dismissedAsChat: true,
+    admission: { admitted: false, reasons: ['no_intent'], kind: 'chat' },
+  }, T0)
+  const store = deepFreeze(makeStoreWithWorks([chat]))
+  const view = projectResumeCards(store, { now: T0 + HOUR })
+  assert.equal(view.excluded.length, 0)
+  assert.equal(view.unresolved.length, 0)
+})
+
+test('projectResumeCards：无 excluded 时返回空数组（结构稳定）', () => {
+  const w = createWork({ id: 'w-only', workspaceId: 'ws-1', title: '唯一', state: 'active' }, T0)
+  const store = deepFreeze(makeStoreWithWorks([w]))
+  const view = projectResumeCards(store, { now: T0 + HOUR })
+  assert.deepEqual(view.excluded, [])
+  assert.equal(view.unresolved.length, 1)
 })
 
 console.log(`\n  ${passed} passed, ${failures.length} failed\n`)

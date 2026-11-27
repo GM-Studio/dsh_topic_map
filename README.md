@@ -221,6 +221,21 @@ node scripts/dry-run-works.mjs --max-sessions 50 --dormant-days 14
 node scripts/dry-run-works.mjs --index-dir <path> --workspace <workspaceId> --json
 ```
 
+### 事续接质量体检（改造前后对比用）
+
+[dry-run-resume-quality.mjs](<scripts/dry-run-resume-quality.mjs>) 直接只读本机 `topic-map/works/` 已落盘的事，
+按工作区汇总**下一步留白率、决策数、跨会话合并数、待确认数、未准入数与准入原因、提炼状态**，
+用来回答「这次改完到底有没有变好」。只输出聚合数字，不打印任何会话正文：
+
+```bash
+node scripts/dry-run-resume-quality.mjs          # 人类可读表格
+node scripts/dry-run-resume-quality.mjs --json   # 机器可读
+node scripts/dry-run-resume-quality.mjs --dir <topic-map/works 目录>
+```
+
+改造前的真机基线记录在 [resume-v2-baseline.md](<docs/audits/resume-v2-baseline.md>)
+（237 条事、下一步留白 81.4%、决策 0 条、语义提炼 0/8 成功），可作为回归对比基准。
+
 ---
 
 ## 开发与校验
@@ -245,6 +260,13 @@ node scripts/test-all.mjs         # 全量测试汇总（同时检查退出码�
 - [ADR-0003](<docs/adr/0003-inferred-state-inflection-confirm-and-incremental-merge.md>) — 双态推断、拐点轻确认与「一次盘点 + 增量挂载」
 - [ADR-0004](<docs/adr/0004-lossless-three-layer-handoff.md>) — 三层防失真续接与交接协议
 - [ADR-0005](<docs/adr/0005-trigger-sources-fold-continuations-exclude-subagents.md>) — 三元触发来源模型：折叠异步续跑回调轮，彻底排除子代理与自动化独立会话
+- [ADR-0006](<docs/adr/0006-admission-criteria-for-resumable-works.md>) — 续接准入三条红线：有意图、未收尾、人类主导
+- [ADR-0007](<docs/adr/0007-session-mainline-aggregation-and-awaiting-signal.md>) — 以会话主线为聚合基准，并把「待确认」作为一等信号
+- [ADR-0008](<docs/adr/0008-workspace-scope-switching-and-inspection.md>) — 工作区范围、切区即清态、自动补齐与跨区巡检
+- [ADR-0009](<docs/adr/0009-next-step-suggestion-and-resume-guidance.md>) — 下一步建议与续接引导协议
+- [ADR-0010](<docs/adr/0010-semantic-refinement-reliability-and-visibility.md>) — 语义提炼的可靠性与可见性：绝不静默降级
+- [接口契约](<docs/contracts/resume-v2-interfaces.md>) — 事续接 v2 的模块签名与字段定义（ADR-0006~0010 的实现依据）
+- [改造前基线](<docs/audits/resume-v2-baseline.md>) — 动手前的真机量化证据与复现命令
 - 早期历史索引阶段设计存档位于 `openspec/changes/history-index/`（供查阅底座演进背景）
 
 ---

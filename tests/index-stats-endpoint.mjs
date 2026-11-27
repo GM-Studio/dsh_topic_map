@@ -13,6 +13,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { readIndexStats } from '../lib/index.js'
+import { INDEX_SCHEMA } from '../lib/turn-index.js'
 
 let passed = 0
 const failures = []
@@ -48,7 +49,7 @@ function makeCtx(workspaces = [{
 function indexText(turnCount, revision = 'rev-1') {
   const meta = JSON.stringify({
     kind: 'meta',
-    schema: 5,
+    schema: INDEX_SCHEMA,
     revision,
     turnCount,
   })

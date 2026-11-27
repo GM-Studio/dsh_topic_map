@@ -14,12 +14,17 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  AUTOMATED_SOURCE_KINDS,
+  CONTINUATION_SOURCE_KINDS,
+  HUMAN_SOURCE_KINDS,
   INDEX_SCHEMA,
   MAX_TURN_TEXT,
   buildTurnRows,
   capTurnText,
+  classifyTurnTrigger,
   defaultSessionsDir,
   indexFilePath,
+  mergeChangesList,
   messageText,
   parseIndexText,
   parseMetaLine,
@@ -79,6 +84,18 @@ function makeEvents(specs) {
         content: [{ type: 'text', text: spec.system }],
         source: { kind: 'system' },
       }, start + 180)
+    }
+    if (spec.sourceKind !== undefined) {
+      push('user/message', {
+        content: [{ type: 'text', text: spec.sourceText ?? '' }],
+        source: { kind: spec.sourceKind },
+      }, start + 190)
+    }
+    for (const msg of spec.userMessages ?? []) {
+      push('user/message', {
+        content: [{ type: 'text', text: msg.text ?? '' }],
+        source: msg.source ?? { kind: msg.kind },
+      }, start + 195)
     }
     for (let step = 0; step < (spec.steps ?? 1); step += 1) {
       push('step/start', {}, start + 200 + step)
@@ -488,7 +505,7 @@ await test('revision 数字入参按字符串比较', async () => {
   })
 })
 
-await test('schema 4 旧索引判定过期并整体重建到 schema 5', async () => {
+await test('schema 5 旧索引判定过期并整体重建到 schema 6', async () => {
   await withTempDir(async dir => {
     const events = makeEvents([{
       prompt: '旧索引',
@@ -501,13 +518,13 @@ await test('schema 4 旧索引判定过期并整体重建到 schema 5', async ()
       loadEvents: async () => events,
     })
 
-    // 手工退回 schema 4：只改 meta，模拟 F-7 hash 之前的产物。
+    // 手工退回 schema 5：只改 meta，模拟 ADR-0005 三元触发折叠之前的产物。
     const lines = (await readFile(first.path, 'utf8')).trimEnd().split('\n')
     const meta = JSON.parse(lines[0])
-    meta.schema = 4
+    meta.schema = 5
     await writeFile(first.path, [JSON.stringify(meta), ...lines.slice(1)].join('\n') + '\n', 'utf8')
 
-    assert.equal(await readIndexMeta(dir, 'sess-schema'), null, 'schema 4 不该被当成可用索引')
+    assert.equal(await readIndexMeta(dir, 'sess-schema'), null, 'schema 5 不该被当成可用索引')
     const stale = await readIndexFile(dir, 'sess-schema')
     assert.equal(stale.ok, false)
     assert.equal(stale.reason, 'meta')
@@ -522,14 +539,15 @@ await test('schema 4 旧索引判定过期并整体重建到 schema 5', async ()
         return events
       },
     })
-    assert.equal(second.skipped, false, 'schema 4 必须触发重建')
+    assert.equal(second.skipped, false, 'schema 5 必须触发重建')
     assert.equal(second.reason, 'meta')
     assert.equal(loads, 1)
     const parsed = parseIndexText(await readFile(second.path, 'utf8'))
     assert.equal(parsed.meta.schema, INDEX_SCHEMA)
-    assert.equal(parsed.meta.schema, 5)
+    assert.equal(parsed.meta.schema, 6)
     assert.deepEqual(parsed.turns[0].commands, ['echo hi'])
     assert.equal(Number.isInteger(parsed.turns[0].endSeq), true)
+    assert.equal(parsed.turns[0].trigger, 'human')
   })
 })
 
@@ -733,6 +751,299 @@ await test('sessionId 里的路径分隔符不会逃出索引目录', () => {
   assert.equal(indexFilePath('D:\\idx', 'a/b'), join('D:\\idx', 'a_b.jsonl'))
   assert.equal(indexFilePath('D:\\idx', 'a\\b'), join('D:\\idx', 'a_b.jsonl'))
   assert.throws(() => indexFilePath('D:\\idx', ''), /sessionId/)
+})
+
+
+// ── ADR-0005：三元触发来源分类与异步续跑折叠 ──────────────────────────
+
+await test('触发来源常量与 classifyTurnTrigger 口径准确', () => {
+  assert.deepEqual([...HUMAN_SOURCE_KINDS].sort(), ['retry', 'user'])
+  assert.deepEqual(
+    [...CONTINUATION_SOURCE_KINDS].sort(),
+    ['agent-message', 'goal', 'subagent-settled', 'team-message', 'tool-jobs'],
+  )
+  assert.deepEqual([...AUTOMATED_SOURCE_KINDS].sort(), ['schedule'])
+
+  // human 优先于一切其它 source.kind
+  assert.equal(classifyTurnTrigger(['user']), 'human')
+  assert.equal(classifyTurnTrigger(['retry']), 'human')
+  assert.equal(classifyTurnTrigger(['subagent-settled', 'user']), 'human')
+  assert.equal(classifyTurnTrigger(['schedule', 'retry']), 'human')
+
+  // automated
+  assert.equal(classifyTurnTrigger(['schedule']), 'automated')
+  assert.equal(classifyTurnTrigger(['schedule', 'subagent-settled']), 'automated')
+
+  // continuation 五类权威值
+  for (const kind of ['subagent-settled', 'agent-message', 'team-message', 'goal', 'tool-jobs']) {
+    assert.equal(classifyTurnTrigger([kind]), 'continuation', `${kind} 应判定为 continuation`)
+  }
+  assert.equal(classifyTurnTrigger(new Set(['subagent-settled'])), 'continuation')
+
+  // 无有效唤醒源时默认 unknown（无前置人类轮时）；显式传 hasPrecedingHuman 可判 continuation
+  assert.equal(classifyTurnTrigger([]), 'unknown')
+  assert.equal(classifyTurnTrigger(['system']), 'unknown')
+  assert.equal(classifyTurnTrigger([], { hasPrecedingHuman: true }), 'continuation')
+  assert.equal(classifyTurnTrigger(['system'], { hasPrecedingHuman: true }), 'continuation')
+})
+
+await test('五类 continuation 轮全部折叠进前一个 human 轮，记录 foldedTurns 并聚合全部事实', () => {
+  const events = makeEvents([
+    {
+      turn: 10,
+      prompt: '并行修复 5 个模块并跑全量测试',
+      response: '已派发后台子代理并行推进。',
+      steps: 2,
+      calls: [{ name: 'subagent', args: { path: 'lib/a.js' } }],
+      usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 10, cacheWriteTokens: 5, reasoningTokens: 2 },
+      endReason: 'completed',
+    },
+    {
+      turn: 11,
+      sourceKind: 'subagent-settled',
+      sourceText: 'subagent 1 done',
+      response: '进度同步：1/4 完成，其余子代理继续执行。',
+      steps: 1,
+      calls: [{ name: 'read', args: { path: 'lib/b.js' } }],
+      usage: { inputTokens: 50, outputTokens: 10 },
+    },
+    {
+      turn: 12,
+      sourceKind: 'agent-message',
+      sourceText: 'agent msg',
+      response: '进度同步：2/4 完成。',
+      steps: 1,
+      calls: [{ name: 'edit', args: { path: 'lib/c.js' } }],
+      usage: { inputTokens: 60, outputTokens: 15 },
+    },
+    {
+      turn: 13,
+      sourceKind: 'team-message',
+      sourceText: 'team msg',
+      response: '进度同步：3/4 完成。',
+      steps: 1,
+      calls: [{ name: 'edit', args: { path: 'lib/d.js' } }],
+      usage: { inputTokens: 70, outputTokens: 15 },
+    },
+    {
+      turn: 14,
+      sourceKind: 'tool-jobs',
+      sourceText: 'job done',
+      response: '收到后台任务输出，继续验证。',
+      steps: 1,
+      calls: [{ name: 'bash', args: { command: 'node tests/turn-index.mjs' } }],
+      usage: { inputTokens: 80, outputTokens: 20 },
+    },
+    {
+      turn: 15,
+      sourceKind: 'goal',
+      sourceText: 'goal continue',
+      response: '全部 5 个模块修复完成，所有测试 100% 通过并已核验。',
+      steps: 3,
+      calls: [
+        { name: 'bash', args: { command: 'node scripts/test.mjs' } },
+        { name: 'edit', args: { path: 'lib/e.js' } },
+      ],
+      usage: { inputTokens: 200, outputTokens: 50, cacheReadTokens: 30, cacheWriteTokens: 10, reasoningTokens: 8 },
+      endReason: 'completed',
+    },
+  ])
+
+  const rows = buildTurnRows(events)
+  assert.equal(rows.length, 1, '五个 continuation 轮必须全部折叠进 turn 10')
+  const [host] = rows
+
+  const start10 = events.find(e => e.type === 'turn/start' && e.data.turn === 10)
+  const end15 = events.find(e => e.type === 'turn/end' && e.data.turn === 15)
+
+  // 定位锚点保持人类发起轮
+  assert.equal(host.turn, 10)
+  assert.equal(host.seq, start10.seq)
+  assert.equal(host.start, start10.time)
+  assert.equal(host.prompt, '并行修复 5 个模块并跑全量测试')
+  assert.equal(host.trigger, 'human')
+  assert.deepEqual(host.foldedTurns, [11, 12, 13, 14, 15])
+
+  // 终结时间与 endSeq 取最新折叠轮
+  assert.equal(host.end, end15.time)
+  assert.equal(host.endSeq, end15.seq)
+  assert.equal(host.ms, end15.time - start10.time)
+  assert.equal(host.endReason, 'completed')
+  assert.equal(host.interrupted, false)
+
+  // 用量、步数累加，工具/文件/命令去重合并
+  assert.equal(host.steps, 2 + 1 + 1 + 1 + 1 + 3)
+  assert.deepEqual(host.usage, {
+    input: 560,
+    output: 130,
+    cacheRead: 40,
+    cacheWrite: 15,
+    reasoning: 10,
+  })
+  assert.deepEqual(host.tools, ['subagent', 'read', 'edit', 'bash'])
+  assert.deepEqual(host.files, ['lib/a.js', 'lib/b.js', 'lib/c.js', 'lib/d.js', 'lib/e.js'])
+  assert.deepEqual(host.commands, ['node tests/turn-index.mjs', 'node scripts/test.mjs'])
+
+  // 最终收口结论必须完整保留，中间纯心跳噪音被消隐
+  assert.ok(host.response.includes('全部 5 个模块修复完成，所有测试 100% 通过并已核验。'))
+  assert.equal(host.response.includes('进度同步：2/4 完成'), false, '中间纯心跳噪音应被去噪')
+  assert.equal(host.response.includes('进度同步：3/4 完成'), false, '中间纯心跳噪音应被去噪')
+
+  // JSONL 往返完全可逆
+  const text = serializeIndex({ revision: 'rev-fold', turns: rows })
+  const parsed = parseIndexText(text)
+  assert.equal(parsed.ok, true)
+  assert.deepEqual(parsed.turns, rows)
+})
+
+await test('子轮异常中断与 endReason：准确反映折叠整轮的最终状态', () => {
+  const events = makeEvents([
+    { turn: 1, prompt: '跑长任务', response: '已启动后台任务', endReason: 'completed' },
+    {
+      turn: 2,
+      sourceKind: 'subagent-settled',
+      messages: [{ text: '中途出错停止', interrupted: true }],
+      endReason: 'interrupted',
+    },
+  ])
+  const [host] = buildTurnRows(events)
+  assert.equal(host.turn, 1)
+  assert.deepEqual(host.foldedTurns, [2])
+  assert.equal(host.interrupted, true)
+  assert.equal(host.endReason, 'interrupted')
+  assert.ok(host.response.includes('中途出错停止'))
+})
+
+await test('折叠多轮总文本超过 32k 时优先保留末尾最终收口回复', () => {
+  const earlyPadding = '早期阶段记录。'.repeat(5000) // ~35000 chars
+  const finalConclusion = '最终收口结论：全部重构完成并通过回归验证。'
+  const events = makeEvents([
+    { turn: 0, prompt: '做大重构', response: earlyPadding },
+    { turn: 1, sourceKind: 'subagent-settled', response: finalConclusion },
+  ])
+  const [host] = buildTurnRows(events)
+  assert.equal(host.truncated, true)
+  assert.equal(host.prompt, '做大重构')
+  assert.equal(host.prompt.length + host.response.length, MAX_TURN_TEXT)
+  assert.ok(host.response.endsWith(finalConclusion), '超 32k 预算时必须优先保留末尾收口回复')
+})
+
+await test('历史无 source 标记的空提问回调轮紧跟 human 轮时自动折叠；纯合成无 user/message 夹具不误折叠', () => {
+  // 真实历史日志：turn 0 人类提问，turn 1 只有 system 注入或无 user/message（空提问回调轮）
+  const realLike = makeEvents([
+    { turn: 0, prompt: '帮我重构索引', response: '开始处理' },
+    { turn: 1, system: 'subagent finished notice', response: '重构完毕并已测试通过' },
+    { turn: 2, prompt: '下一步做什么', response: '清理缓存' },
+  ])
+  const realRows = buildTurnRows(realLike)
+  assert.equal(realRows.length, 2, '紧跟 human 轮后的空提问回调轮应折叠进 turn 0')
+  assert.equal(realRows[0].turn, 0)
+  assert.deepEqual(realRows[0].foldedTurns, [1])
+  assert.ok(realRows[0].response.includes('重构完毕并已测试通过'))
+  assert.equal(realRows[1].turn, 2)
+  assert.equal(realRows[1].foldedTurns, undefined)
+
+  // 合成旧夹具：整场都没有任何 user/message，保留各自轮次不被误折叠为空
+  const synthetic = makeEvents([
+    { turn: 0, response: '第 0 轮输出' },
+    { turn: 1, response: '第 1 轮输出' },
+  ])
+  const syntheticRows = buildTurnRows(synthetic)
+  assert.equal(syntheticRows.length, 2, '无 user/message 的极简合成夹具不应被误折叠')
+  assert.equal(syntheticRows[0].trigger, 'unknown')
+  assert.equal(syntheticRows[1].trigger, 'unknown')
+})
+
+await test('schedule 轮标记为 automated 且不误折叠进前一个 human 轮；retry 轮作为独立 human 轮保留', () => {
+  const events = makeEvents([
+    { turn: 0, prompt: '人类提问', response: '人类回复' },
+    { turn: 1, sourceKind: 'schedule', sourceText: '每日巡检', response: '巡检完成' },
+    { turn: 2, sourceKind: 'retry', sourceText: '重试上一次', response: '重试回复' },
+  ])
+  const rows = buildTurnRows(events)
+  assert.equal(rows.length, 3, 'schedule 与 retry 都不应被折叠进 turn 0')
+  assert.equal(rows[0].turn, 0)
+  assert.equal(rows[0].trigger, 'human')
+  assert.equal(rows[0].foldedTurns, undefined)
+
+  assert.equal(rows[1].turn, 1)
+  assert.equal(rows[1].trigger, 'automated')
+  assert.equal(rows[1].foldedTurns, undefined)
+
+  assert.equal(rows[2].turn, 2)
+  assert.equal(rows[2].trigger, 'human')
+  assert.equal(rows[2].prompt, '重试上一次')
+})
+
+await test('无前置轮次的孤立 continuation 轮不崩溃、保留为独立行', () => {
+  const events = makeEvents([
+    { turn: 0, sourceKind: 'subagent-settled', sourceText: 'orphan callback', response: '孤立回调' },
+    { turn: 1, prompt: '后续人类提问', response: '正常回复' },
+  ])
+  const rows = buildTurnRows(events)
+  assert.equal(rows.length, 2)
+  assert.equal(rows[0].turn, 0)
+  assert.equal(rows[0].trigger, 'continuation')
+  assert.equal(rows[1].turn, 1)
+  assert.equal(rows[1].trigger, 'human')
+})
+
+await test('mergeChangesList：按 path 去重以较后轮次为准、汇总 total/added/deleted、正确处理 lost', () => {
+  const c1 = {
+    files: [
+      { path: 'lib/a.js', added: 10, deleted: 2, hash: 'h1' },
+      { path: 'lib/b.js', added: 5, deleted: 0, hash: 'h2' },
+    ],
+    total: 2,
+    added: 15,
+    deleted: 2,
+    lost: false,
+  }
+  const c2 = {
+    files: [
+      { path: 'lib/a.js', added: 20, deleted: 4, hash: 'h1-new' },
+      { path: 'lib/c.js', added: 3, deleted: 1, hash: null, hashSkipped: 'missing' },
+    ],
+    total: 2,
+    added: 23,
+    deleted: 5,
+    lost: false,
+  }
+  const merged = mergeChangesList(c1, c2)
+  assert.deepEqual(merged, {
+    files: [
+      { path: 'lib/a.js', added: 20, deleted: 4, hash: 'h1-new' },
+      { path: 'lib/b.js', added: 5, deleted: 0, hash: 'h2' },
+      { path: 'lib/c.js', added: 3, deleted: 1, hash: null, hashSkipped: 'missing' },
+    ],
+    total: 3,
+    added: 28,
+    deleted: 5,
+    lost: false,
+  })
+  // 不修改入参
+  assert.equal(c1.files[0].hash, 'h1')
+
+  // Windows 大小写/分隔符去重
+  const winMerged = mergeChangesList(
+    { files: [{ path: 'lib\\A.js', added: 1, deleted: 0, hash: 'old' }], total: 1, added: 1, deleted: 0, lost: false },
+    { files: [{ path: 'lib/a.js', added: 4, deleted: 2, hash: 'new' }], total: 1, added: 4, deleted: 2, lost: false },
+  )
+  assert.equal(winMerged.files.length, 1)
+  assert.deepEqual(winMerged.files[0], { path: 'lib/a.js', added: 4, deleted: 2, hash: 'new' })
+
+  // 一方 lost、另一方有效：保留有效明细且 lost:false
+  const lost = { files: [], total: 0, added: 0, deleted: 0, lost: true }
+  assert.deepEqual(mergeChangesList(lost, c1), c1)
+  assert.deepEqual(mergeChangesList(c1, lost), c1)
+
+  // 双方都 lost：保留 lost:true
+  assert.deepEqual(mergeChangesList(lost, lost), lost)
+
+  // 空值容错
+  assert.deepEqual(mergeChangesList(null, c1), c1)
+  assert.deepEqual(mergeChangesList(c1, undefined), c1)
+  assert.equal(mergeChangesList(null, undefined), null)
 })
 
 console.log(`\n${passed} passed, ${failures.length} failed`)

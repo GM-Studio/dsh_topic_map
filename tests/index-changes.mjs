@@ -341,7 +341,7 @@ await test('legacy 重建：schema 4 历史轮次 hash:null，不拿当前磁盘
     await writeFile(join(workspace, 'target.js'), current, 'utf8')
     const events = makeEvents([{ prompt: '历史变更', changes: true }])
 
-    // 先造一份 schema 5 索引，再手工退回 schema 4，模拟升级前的旧索引。
+    // 先造一份当前 schema 索引，再手工退回 schema 4，模拟升级前的旧索引。
     const first = await syncSessionIndex({
       dir,
       sessionId: 'sess-legacy',
@@ -367,7 +367,7 @@ await test('legacy 重建：schema 4 历史轮次 hash:null，不拿当前磁盘
     assert.equal(rebuilt.reason, 'meta')
     const parsed = parseIndexText(await readFile(rebuilt.path, 'utf8'))
     assert.equal(parsed.meta.schema, INDEX_SCHEMA)
-    assert.equal(parsed.meta.schema, 5)
+    assert.equal(parsed.meta.schema, 6)
     const changed = parsed.turns[0]
     assert.deepEqual(changed.changes.files, [
       { path: 'target.js', added: 1, deleted: 0, hash: null },

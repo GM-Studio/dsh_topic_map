@@ -1,4 +1,4 @@
-# 执行清单
+# 执行清单（历史索引底座阶段 · 已完成并由 `archive/2026-11-27-work-continuation-and-trigger-sources/` 演进归档）
 
 **环境**：bash 可用（`E:\dsh_plugin` 所有权已修复）；仓库为 git，最新提交见 `git log -1`。
 每项完成 = 先红后绿 + 定向测试 + 全量 + 构建 + `verify-bundle` + 真实 DSH 证据 + 独立本地提交（不推送）。

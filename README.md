@@ -177,8 +177,9 @@ dsh plugin --profile desktop add link:E:/dsh_plugin
 | 端点 | 作用 |
 |---|---|
 | `POST /works` | 读取工作区「事」物化视图（未收束 / 已收束卡片、待核对数、最新拐点、重开建议） |
-| `POST /works-scan` | 执行存量冷启动盘点或强制重扫（支持 `force`、`useModel`） |
-| `POST /work-confirm` | 人工确认或编辑一条事（状态、标题、目标、卡点、下一步、置顶），转为「已确认态」锁定 |
+| `POST /works-scan` | 执行存量冷启动盘点或强制重扫（支持 `force`、`useModel`、`asyncRefine` 两阶段快返与后台异步精化） |
+| `POST /work-confirm` | 人工确认或编辑一条事（状态、标题、目标、卡点、下一步、置顶、决策取代），转为「已确认态」锁定 |
+| `POST /work-review-all` | 一键批量确认并锁定本工作区全部待核对的未收束「事」 |
 | `POST /work-dismiss` | 将误判的事标为「不算事」（降回日常话题，并记录排除段防重复立事） |
 | `POST /work-promote` | 将一个日常「话题」段一键转为一条「事」（话题 → 事） |
 | `POST /work-merge` | 合并两条同源的事（`targetWorkId`、`sourceWorkId`） |
@@ -238,7 +239,7 @@ node scripts/test-all.mjs         # 全量测试汇总（同时检查退出码�
 
 领域模型与核心架构决策以根目录术语表和 ADR 为唯一事实源：
 
-- [GLOSSARY.md](<GLOSSARY.md>) — 领域词汇表（事 / 话题 / 段 / 会话 / 轮次 / 决策 / 状态 / 拐点 / 沉降 / 证据 / 续接 / 交接）
+- [GLOSSARY.md](<GLOSSARY.md>) — 领域词汇表（事 / 话题 / 段 / 会话 / 轮次 / 触发来源 / 决策 / 状态 / 拐点 / 沉降 / 证据 / 续接 / 交接）
 - [ADR-0001](<docs/adr/0001-continuator-not-retriever.md>) — 产品以「事的续接」为一等核心，兼顾无状态「话题」回溯
 - [ADR-0002](<docs/adr/0002-decisions-are-first-class.md>) — 决策是事内一等但按需累积的事件
 - [ADR-0003](<docs/adr/0003-inferred-state-inflection-confirm-and-incremental-merge.md>) — 双态推断、拐点轻确认与「一次盘点 + 增量挂载」
@@ -260,4 +261,4 @@ node scripts/test-all.mjs         # 全量测试汇总（同时检查退出码�
 
 ## 版本沿革
 
-- `v1.0.0` — 确立「事的续接 + 话题回溯」双层领域模型；落地段/事/决策/交接核心域（Host 持久化、10 个 `/work*` 端点、事级 Wire 展开、只读干跑诊断）、跨会话检索（索引 schema 6，支持三元触发来源模型：折叠 `subagent-settled` / `agent-message` / `goal` 等异步续跑回调轮并合并文件变更，彻底排除 `origin: 'subagent'` 与定时自动化独立会话）、自动分类、引用体系与历史轨；清理旧 v0 泳道图与三栏主面板遗产。
+- `v1.0.0` — 确立「事的续接 + 话题回溯」双层领域模型；落地段/事/决策/交接核心域（Host 持久化、11 个 `/work*` 端点、事级 Wire 展开、只读干跑诊断）、跨会话检索（索引 schema 6，支持三元触发来源模型：折叠 `subagent-settled` / `agent-message` / `goal` 等异步续跑回调轮并合并文件变更，彻底排除 `origin: 'subagent'` 与定时自动化独立会话）、自动分类、引用体系与历史轨；清理旧 v0 泳道图与三栏主面板遗产。

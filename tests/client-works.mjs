@@ -384,7 +384,13 @@ await test('拐点轻确认动作：确认已完成调 /work-confirm，忽略调
   await m2.runtime.settle()
   const confirmCall = m2.calls.find(c => c.action === 'work-confirm')
   assert.ok(confirmCall !== undefined)
-  assert.deepEqual(confirmCall.body, { workspaceId: 'ws-1', workId: 'w-1', patch: { state: 'done', reviewStatus: 'reviewed' } })
+  // requesterSessionId 是 ADR-0011 加的：后端据此判断是否跨区写。
+  assert.deepEqual(confirmCall.body, {
+    workspaceId: 'ws-1',
+    workId: 'w-1',
+    patch: { state: 'done', reviewStatus: 'reviewed' },
+    requesterSessionId: 'session-abcdef12',
+  })
 })
 
 await test('重开老事轻提示条：点击 [关联重开] 调 /work-confirm(active)', async () => {

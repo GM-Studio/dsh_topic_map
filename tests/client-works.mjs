@@ -203,6 +203,16 @@ async function mountWorks(options) {
       return { value: { work: { id: body.workId }, cards: currentPayload.cards } }
     }
     if (action === 'work-dismiss') return { value: { cards: currentPayload.cards } }
+    if (action === 'work-review-all') {
+      if (currentPayload && currentPayload.cards) {
+        const nextUnresolved = currentPayload.cards.unresolved.map(c => Object.assign({}, c, { reviewStatus: 'reviewed', confidence: 'confirmed' }))
+        currentPayload = Object.assign({}, currentPayload, {
+          pendingReviewCount: 0,
+          cards: Object.assign({}, currentPayload.cards, { unresolved: nextUnresolved, pendingReviewCount: 0 }),
+        })
+      }
+      return { value: { confirmedCount: 1, cards: currentPayload.cards } }
+    }
     if (action === 'work-inflection-dismiss') return { value: { dismissed: true } }
     if (action === 'work-handoff') {
       if (body.mode === 'same-session') {
@@ -478,6 +488,147 @@ await test('空态与一键跳历史：区分冷启动整理中与暂无未收�
   assert.equal(byData(idle.runtime.tree, 'data-empty-kind', 'no_unresolved').length, 1)
   click(byData(idle.runtime.tree, 'data-action', 'open-history')[0])
   assert.deepEqual(idle.openedTabs, ['topic-map-history'])
+})
+
+await test('核对模式交互：核对说明条、卡片专属核对动作、单条核对递减清零与一键全部确认无误', async () => {
+  const base = sampleWorksResponse()
+  // 两张 pending 卡片便于测试递减
+  base.pendingReviewCount = 2
+  base.cards.pendingReviewCount = 2
+  base.cards.unresolved[1].reviewStatus = 'pending'
+  base.cards.unresolved[1].confidence = 'inferred'
+
+  let livePayload = JSON.parse(JSON.stringify(base))
+  const { runtime, calls } = await mountWorks({
+    payload: livePayload,
+    onFetch(action, body) {
+      if (action === 'works') return { value: livePayload }
+      if (action === 'work-confirm') {
+        livePayload = JSON.parse(JSON.stringify(livePayload))
+        const target = livePayload.cards.unresolved.find(c => c.id === body.workId)
+        if (target) {
+          if (body.patch && body.patch.state) target.state = body.patch.state
+          target.reviewStatus = 'reviewed'
+          target.confidence = 'confirmed'
+        }
+        const remaining = livePayload.cards.unresolved.filter(c => (c.state === 'active' || c.state === 'blocked') && c.reviewStatus === 'pending')
+        livePayload.cards.unresolved = livePayload.cards.unresolved.filter(c => c.state === 'active' || c.state === 'blocked')
+        livePayload.pendingReviewCount = remaining.length
+        livePayload.cards.pendingReviewCount = remaining.length
+        return { value: { work: target || { id: body.workId }, cards: livePayload.cards } }
+      }
+      if (action === 'work-review-all') {
+        livePayload = JSON.parse(JSON.stringify(livePayload))
+        let count = 0
+        for (const c of livePayload.cards.unresolved) {
+          if (c.reviewStatus === 'pending') {
+            c.reviewStatus = 'reviewed'
+            c.confidence = 'confirmed'
+            count += 1
+          }
+        }
+        livePayload.pendingReviewCount = 0
+        livePayload.cards.pendingReviewCount = 0
+        return { value: { confirmedCount: count, cards: livePayload.cards } }
+      }
+      return undefined
+    },
+  })
+
+  // 横幅应含「开始逐条核对」与「全部确认无误」
+  const openReviewBtn = byData(runtime.tree, 'data-action', 'open-review')[0]
+  assert.ok(openReviewBtn !== undefined)
+  assert.ok(textOf(openReviewBtn).includes('开始逐条核对'))
+  assert.ok(typeof openReviewBtn.props.title === 'string' && openReviewBtn.props.title.length > 0, '核对按钮应有 tooltip')
+  const scanBtn = byData(runtime.tree, 'data-action', 'works-scan')[0]
+  assert.ok(typeof scanBtn.props.title === 'string' && scanBtn.props.title.length > 0, '重新盘点按钮应有 tooltip')
+
+  // 进入核对模式
+  click(openReviewBtn)
+  await runtime.settle()
+  assert.equal(byData(runtime.tree, 'data-review-guide', '1').length, 1, '开启核对模式后应显示核对说明条')
+  assert.equal(byData(runtime.tree, 'data-action', 'confirm-all-review').length, 1, '应提供全部确认无误按钮')
+  assert.ok(textOf(byData(runtime.tree, 'data-action', 'open-review')[0]).includes('退出核对'))
+
+  // 卡片进入核对态：高亮属性 + 专属动作 [✓ 确认还在做] [✓ 已完成] [不算事]
+  const reviewCards = byClass(runtime.tree, 'dsh_tm_workcard')
+  assert.equal(reviewCards.length, 2)
+  assert.equal(reviewCards[0].props['data-reviewing'], '1')
+  assert.equal(byData(reviewCards[0], 'data-action', 'review-keep').length, 1)
+  assert.equal(byData(reviewCards[0], 'data-action', 'review-done').length, 1)
+  assert.equal(byData(reviewCards[0], 'data-action', 'review-dismiss').length, 1)
+
+  // 点击第一张「✓ 确认还在做」，立即从待核对列表消失、数字递减到 1
+  click(byData(reviewCards[0], 'data-action', 'review-keep')[0])
+  await runtime.settle()
+  const keepCall = calls.find(c => c.action === 'work-confirm' && c.body.workId === reviewCards[0].props['data-work-id'])
+  assert.ok(keepCall !== undefined)
+  assert.equal(keepCall.body.patch.reviewStatus, 'reviewed')
+  assert.equal(byClass(runtime.tree, 'dsh_tm_workcard').length, 1, '核对完一张应立即从待核对列表消失')
+
+  // 点击「全部确认无误」，清零并退出核对模式、提示全部核对完成
+  click(byData(runtime.tree, 'data-action', 'confirm-all-review')[0])
+  await runtime.settle()
+  assert.ok(calls.some(c => c.action === 'work-review-all'))
+  assert.equal(byData(runtime.tree, 'data-banner', 'pending-review').length, 0)
+  const notices = byClass(runtime.tree, 'dsh_tm_worksnotice')
+  assert.ok(notices.length > 0 && textOf(notices[0]).includes('核对完成'))
+})
+
+await test('重新盘点与后台精化轮询：传 asyncRefine:true、展示统计反馈与 refining 状态条并自动刷新', async () => {
+  let pollCount = 0
+  const base = sampleWorksResponse()
+  const scanFastPayload = Object.assign({}, JSON.parse(JSON.stringify(base)), {
+    refining: true,
+    stats: { sessionsScanned: 12, segmentsCount: 18, unresolvedCount: 2, settledCount: 1, semanticUsed: false },
+    lastScanSummary: { sessionsScanned: 12, segmentsCount: 18, unresolvedCount: 2, settledCount: 1, semanticUsed: false, at: NOW },
+  })
+  const refinedPayload = JSON.parse(JSON.stringify(base))
+  refinedPayload.refining = false
+  refinedPayload.cards.unresolved[0].title = '深度提炼后的标题'
+  refinedPayload.lastScanSummary = { sessionsScanned: 12, segmentsCount: 18, unresolvedCount: 2, settledCount: 1, semanticUsed: true, at: NOW + 3000 }
+
+  let mode = 'initial'
+  const { runtime, calls } = await mountWorks({
+    payload: base,
+    onFetch(action) {
+      if (action === 'works-scan') {
+        mode = 'refining'
+        return { value: scanFastPayload }
+      }
+      if (action === 'works') {
+        if (mode === 'initial') return { value: base }
+        pollCount += 1
+        return { value: refinedPayload }
+      }
+      return undefined
+    },
+  })
+
+  // 点击重新盘点
+  click(byData(runtime.tree, 'data-action', 'works-scan')[0])
+  await runtime.settle()
+
+  const scanCall = calls.find(c => c.action === 'works-scan')
+  assert.ok(scanCall !== undefined)
+  assert.equal(scanCall.body.force, true)
+  assert.equal(scanCall.body.asyncRefine, true, '客户端重新盘点必须传 asyncRefine:true')
+
+  // 立即展示规则盘点统计反馈与 refining 状态条
+  const notices = byClass(runtime.tree, 'dsh_tm_worksnotice')
+  assert.ok(notices.length > 0, '应展示盘点统计反馈条')
+  assert.ok(textOf(notices[0]).includes('12'), '提示应包含扫描会话数')
+  assert.ok(textOf(notices[0]).includes('2'), '提示应包含未收束件数')
+  assert.equal(byData(runtime.tree, 'data-banner', 'refining').length, 1, 'refining:true 时应显示正在深度提炼状态条')
+
+  // 等待一次轮询（测试环境可覆盖轮询间隔或等真实 2.5s；这里等 2.65s 校验真实轮询）
+  await new Promise(r => setTimeout(r, 2650))
+  await runtime.settle()
+  assert.ok(pollCount >= 1, 'refining:true 时应自动轮询 POST /works')
+  assert.equal(byData(runtime.tree, 'data-banner', 'refining').length, 0, '精化完成后应隐藏 refining 状态条')
+  assert.ok(textOf(runtime.tree).includes('深度提炼后的标题'), '精化完成后卡片应自动无闪烁刷新')
+  const doneNotices = byClass(runtime.tree, 'dsh_tm_worksnotice')
+  assert.ok(doneNotices.length > 0 && textOf(doneNotices[0]).includes('深度提炼已完成'))
 })
 
 await test('历史轨两级目录：标准/宽档渲染段头且点段头跳首轮，细轨隐藏段头', async () => {

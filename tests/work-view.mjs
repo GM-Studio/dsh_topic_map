@@ -355,7 +355,10 @@ test('workBoardModel：顶部状态条、未收束排序（置顶 > blocked > ac
   const collapsed = workBoardModel(payload, { now: NOW, showSettled: false })
   // 顶部状态条
   assert.equal(collapsed.pendingReviewBanner.count, 3)
-  assert.equal(collapsed.pendingReviewBanner.message, '发现 3 件待核对的事')
+  assert.equal(collapsed.pendingReviewBanner.message, '系统自动整理出 3 件待确认的事 — 确认哪些还在推进，改完即锁定不再被覆盖')
+  assert.deepEqual(collapsed.pendingReviewBanner.action, { id: 'open_review', label: '开始逐条核对' })
+  assert.deepEqual(collapsed.pendingReviewBanner.exitAction, { id: 'exit_review', label: '退出核对' })
+  assert.deepEqual(collapsed.pendingReviewBanner.confirmAllAction, { id: 'confirm_all', label: '全部确认无误' })
   assert.equal(collapsed.reopenBanners.length, 1)
   assert.equal(collapsed.reopenBanners[0].workId, 'w-old')
   assert.equal(collapsed.inflectionBanner.workId, 'w-a')

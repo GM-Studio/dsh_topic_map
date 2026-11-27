@@ -586,7 +586,7 @@ test('projectResumeCards 按未收束优先、置顶、blocked 优先于 active�
     'done 与 shelved 折叠到底部 settled 组',
   )
   assert.equal(view.settledCollapsedByDefault, true)
-  assert.equal(view.pendingReviewCount, 3)
+  assert.equal(view.pendingReviewCount, 2, 'pendingReviewCount 仅统计未收束且 pending 的事（排除已搁置 w-shelved）')
 
   // 验证 4 行窄卡片结构
   const blockedCard = view.unresolved.find(c => c.id === 'w-blocked')
@@ -631,6 +631,20 @@ test('异常/空输入边界不抛错（mergeWorks 自合并、不存在 id、�
     settledCollapsedByDefault: true,
     pendingReviewCount: 0,
   })
+})
+
+test('projectResumeCards：pendingReviewCount 绝不把已沉降(shelved)/已完成(done)算进待核对数', () => {
+  const now = T0 + 20 * DAY
+  const works = [
+    createWork({ id: 'w-settled-1', workspaceId: 'ws-1', title: '已沉降1', state: 'shelved', reviewStatus: 'pending', lastActivityAt: T0 }, T0),
+    createWork({ id: 'w-settled-2', workspaceId: 'ws-1', title: '已完成2', state: 'done', reviewStatus: 'pending', lastActivityAt: T0 }, T0),
+    createWork({ id: 'w-reviewed', workspaceId: 'ws-1', title: '已核对进行中', state: 'active', reviewStatus: 'reviewed', lastActivityAt: now }, T0),
+  ]
+  const store = deepFreeze(makeStoreWithWorks(works))
+  const view = projectResumeCards(store, { now })
+  assert.equal(view.unresolved.length, 1)
+  assert.equal(view.settled.length, 2)
+  assert.equal(view.pendingReviewCount, 0, '未收束全为 reviewed 时待核对数应为 0，即使已收束里仍有 pending')
 })
 
 console.log(`\n  ${passed} passed, ${failures.length} failed\n`)

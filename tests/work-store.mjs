@@ -23,6 +23,7 @@ import { join } from 'node:path'
 import {
   WORK_CONTEXT_NAME,
   bindHandoffSession,
+  confirmAllPendingWorks,
   confirmWork,
   dismissInflection,
   dismissWork,
@@ -1142,6 +1143,153 @@ await test('POST /works：未初始化且有模型时先立刻返回 L0 硬信�
     assert.equal(second.status, 200)
     assert.equal(second.body.value.cards.unresolved[0].title, '异步精化后的标题')
     assert.equal(second.body.value.cards.unresolved[0].nextStep, '做压测回归')
+  })
+})
+
+await test('scanWorkspaceWorks：返回 stats 统计摘要；asyncRefine:true 立即返回硬信号并后台精化；记录 lastScanSummary', async () => {
+  await withTempHome(async () => {
+    const recentTime = Date.now() - 60_000
+    const events = {
+      [SESS_A]: makeEvents([
+        {
+          prompt: '实现 lib/fast-scan.js 快速盘点统计',
+          response: '完成初版快速盘点',
+          toolCalls: [{ name: 'edit', arguments: { file_path: 'lib/fast-scan.js' } }],
+        },
+      ], recentTime),
+    }
+    let resolveGate
+    const gate = new Promise(r => { resolveGate = r })
+    const llm = makeFakeLlm(async call => {
+      await gate
+      const m = call.messages[0].content[0].text.match(/\[(cl-\d+)\]/)
+      const cid = m ? m[1] : 'cl-1'
+      return JSON.stringify({
+        works: [{
+          clusterIds: [cid],
+          title: '异步精化完成标题',
+          goal: '支持极速盘点与后台精化',
+          state: 'active',
+          statusSummary: '已完成深度归并',
+          nextStep: '验证轮询自动刷新',
+          decisions: [],
+        }],
+        chatClusterIds: [],
+      })
+    })
+    const ctx = makeCtx({ events, llm })
+    apply(ctx)
+    const handler = ctx._routes[0].handler
+
+    // POST /works-scan 传 asyncRefine:true：即使模型卡在 gate，也在极短时间内返回硬信号结果 + stats + refining:true
+    const t0 = Date.now()
+    const scanRes = await callRoute(handler, 'POST', 'works-scan', {
+      workspaceId: WS,
+      force: true,
+      asyncRefine: true,
+    })
+    const elapsed = Date.now() - t0
+    assert.equal(scanRes.status, 200)
+    assert.equal(scanRes.body.ok, true)
+    assert.ok(elapsed < 2000, `asyncRefine 应秒返，实际耗时 ${elapsed}ms`)
+    assert.equal(scanRes.body.value.refining, true)
+    assert.equal(scanRes.body.value.stats.sessionsScanned, 1)
+    assert.ok(scanRes.body.value.stats.segmentsCount >= 1)
+    assert.equal(scanRes.body.value.stats.unresolvedCount, 1)
+    assert.equal(scanRes.body.value.stats.settledCount, 0)
+    assert.equal(scanRes.body.value.stats.semanticUsed, false)
+    assert.ok(scanRes.body.value.lastScanSummary !== null)
+
+    // 放开模型 gate，等后台精化完成
+    resolveGate()
+    await new Promise(r => setTimeout(r, 80))
+
+    const viewRes = await callRoute(handler, 'POST', 'works', { workspaceId: WS })
+    assert.equal(viewRes.status, 200)
+    assert.equal(viewRes.body.value.refining, false)
+    assert.equal(viewRes.body.value.cards.unresolved[0].title, '异步精化完成标题')
+    assert.equal(viewRes.body.value.lastScanSummary.semanticUsed, true)
+    assert.equal(viewRes.body.value.lastScanSummary.unresolvedCount, 1)
+  })
+})
+
+await test('callSemanticModel 硬超时保护（Promise.race）：忽略 abort 的卡死适配器在 timeoutMs 后立即降级', async () => {
+  await withTempHome(async () => {
+    const recentTime = Date.now() - 60_000
+    const events = {
+      [SESS_A]: makeEvents([
+        {
+          prompt: '排查 lib/hang-adapter.js 超时卡死',
+          response: '复现挂起问题',
+          toolCalls: [{ name: 'edit', arguments: { file_path: 'lib/hang-adapter.js' } }],
+        },
+      ], recentTime),
+    }
+    // 故意忽略 signal 的永不 resolve 模型
+    const neverResolvingLlm = {
+      async *chat() {
+        await new Promise(() => {})
+      },
+    }
+    const ctx = makeCtx({ events, llm: neverResolvingLlm })
+    const t0 = Date.now()
+    const res = await scanWorkspaceWorks(ctx, WS, {
+      force: true,
+      useModel: true,
+      modelTimeoutMs: 60,
+      now: recentTime + 10_000,
+    })
+    const elapsed = Date.now() - t0
+    assert.equal(res.ok, true)
+    assert.equal(res.semanticUsed, false, '超时后应降级回硬信号聚类')
+    assert.equal(res.stats.semanticUsed, false)
+    assert.equal(res.cards.unresolved.length, 1)
+    assert.ok(elapsed < 1000, `硬超时 60ms 应快速返回，实际耗时 ${elapsed}ms`)
+  })
+})
+
+await test('confirmAllPendingWorks 与 POST /work-review-all：一键批量确认全部待核对的未收束事', async () => {
+  await withTempHome(async () => {
+    const recentTime = Date.now() - 60_000
+    const oldTime = Date.now() - 20 * 24 * 60 * 60 * 1000
+    const events = {
+      [SESS_A]: makeEvents([
+        {
+          prompt: '实现 lib/alpha.js',
+          response: '完成 alpha',
+          toolCalls: [{ name: 'edit', arguments: { file_path: 'lib/alpha.js' } }],
+        },
+      ], recentTime),
+      [SESS_B]: makeEvents([
+        {
+          prompt: '旧工作 lib/old-beta.js',
+          response: '旧记录',
+          toolCalls: [{ name: 'edit', arguments: { file_path: 'lib/old-beta.js' } }],
+        },
+      ], oldTime),
+    }
+    const ctx = makeCtx({ events })
+    apply(ctx)
+    const handler = ctx._routes[0].handler
+
+    const first = await callRoute(handler, 'POST', 'works', { workspaceId: WS })
+    assert.equal(first.status, 200)
+    assert.equal(first.body.value.cards.unresolved.length, 1)
+    assert.equal(first.body.value.cards.settled.length, 1)
+    assert.equal(first.body.value.pendingReviewCount, 1, '已沉降的老事不算进待核对数')
+
+    const reviewAll = await callRoute(handler, 'POST', 'work-review-all', { workspaceId: WS })
+    assert.equal(reviewAll.status, 200)
+    assert.equal(reviewAll.body.ok, true)
+    assert.equal(reviewAll.body.value.confirmedCount, 1)
+    assert.equal(reviewAll.body.value.cards.pendingReviewCount, 0)
+    assert.equal(reviewAll.body.value.cards.unresolved[0].reviewStatus, 'reviewed')
+    assert.equal(reviewAll.body.value.cards.unresolved[0].confidence, 'confirmed')
+
+    // 再次调用幂等返回 0
+    const again = await confirmAllPendingWorks(WS)
+    assert.equal(again.ok, true)
+    assert.equal(again.confirmedCount, 0)
   })
 })
 

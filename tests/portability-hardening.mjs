@@ -51,7 +51,6 @@ await test('服务守卫用 == null，同时挡住 null 与 undefined', () => {
   assert.equal(src.includes('SESSION_SERVICE === null'), false, '不应只判 null')
   assert.equal(src.includes('CONVERSATION_SERVICE === null'), false, '不应只判 null')
   assert.ok(src.includes('SESSION_SERVICE == null'), '应使用 == null')
-  assert.ok(src.includes('CONVERSATION_SERVICE == null'), '应使用 == null')
 })
 
 // ── 3. description 与实际一致 ──────────────────────────────────────
@@ -142,14 +141,6 @@ await test('缓存清理只碰 topic-map 下的 ui/ 与 segments/，不碰 confi
 await test('不再发布 locale/*.json（文案已内嵌）', () => {
   assert.equal(JSON.stringify(pkg.files ?? []).includes('locale'), false, 'files 不应含 locale')
   assert.equal(JSON.stringify(pkg.exports ?? {}).includes('locale'), false, 'exports 不应含 locale')
-})
-
-// ── 6. 零工作区提示 ──────────────────────────────────────────────
-await test('零工作区时给出区分于"还没归类"的提示', () => {
-  assert.ok(src.includes('noWorkspace'), '应有 noWorkspace 标记')
-  assert.ok(src.includes('还没有登记任何工作区'), '应有专门文案')
-  const at = src.indexOf("className: 'dsh_tm_clistempty'")
-  assert.ok(at > 0, '应能找到空态')
 })
 
 await test('旧「归类」按钮已随 /categorize 下线', () => {

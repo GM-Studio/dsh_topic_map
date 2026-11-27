@@ -1494,16 +1494,12 @@ await test('/category-override 已接线：200 + {store,tree,locked:true}', asyn
   })
 })
 
-await test('/categorize：保留但带 deprecated:true，并记一条诊断日志', async () => {
+await test('/categorize：旧端点已下线，返回 404 unknown action', async () => {
   await withTempHome(async () => {
-    clearAutoClassifyDiagnostics()
     const handler = registerHandler()
     const result = await callRoute(handler, 'categorize', { workspaceId: WS })
-    assert.equal(result.status, 200)
-    assert.equal(result.body.ok, true)
-    assert.equal(result.body.value.deprecated, true, '旧端点必须显式标 deprecated')
-    const entries = getAutoClassifyDiagnostics(20)
-    assert.ok(entries.some(entry => entry.kind === 'deprecated-endpoint'))
+    assert.equal(result.status, 404)
+    assert.equal(result.body.ok, false)
   })
 })
 

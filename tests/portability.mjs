@@ -8,7 +8,8 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { buildSessionPayloadParts } from '../lib/payload.js'
+import { buildTurnModel } from '../lib/turn-model.js'
+import { assignLanes } from '../lib/lane-engine.js'
 import { buildCategoryTree, prepareSessions } from '../lib/session-category.js'
 import { isDeliverablePath } from '../lib/deliverables.js'
 
@@ -53,6 +54,12 @@ function makeLog(turnCount, opts = {}) {
   return events
 }
 
+async function buildSessionParts(events, sessionId) {
+  const model = buildTurnModel(events)
+  const lanes = assignLanes({ ...model, sessionId })
+  return { turns: model.turns, lanes }
+}
+
 console.log('\nportability')
 
 // ── 非中文数据 ──────────────────────────────────────────────────────
@@ -61,45 +68,39 @@ await test('英文会话能被正常分段（不依赖中文分词）', async ()
     prompt: i => `Question ${i} about database indexing strategy`,
     reply: i => `Answer ${i} with details`,
   })
-  const p = await buildSessionPayloadParts(events, 'en-session')
+  const p = await buildSessionParts(events, 'en-session')
   assert.equal(p.turns.length, 10, `应 10 轮，实际 ${p.turns.length}`)
-  assert.ok(p.graph.nodes.length > 0, '应有节点')
   assert.ok(p.lanes.length >= 1, '应有泳道')
 })
 
 await test('日文会话不崩', async () => {
   const events = makeLog(5, { prompt: i => `質問${i}について教えて`, reply: i => `回答${i}` })
-  const p = await buildSessionPayloadParts(events, 'ja-session')
+  const p = await buildSessionParts(events, 'ja-session')
   assert.equal(p.turns.length, 5)
 })
 
 await test('全失败会话：每轮都识别为 error', async () => {
   const events = makeLog(6, { endReason: 'error' })
-  const p = await buildSessionPayloadParts(events, 'err-session')
+  const p = await buildSessionParts(events, 'err-session')
   assert.equal(p.turns.length, 6)
   assert.ok(p.turns.every(t => t.endReason === 'error'), '全部应为 error')
 })
 
 await test('单轮会话也能出图', async () => {
-  const p = await buildSessionPayloadParts(makeLog(1), 'one-turn')
+  const p = await buildSessionParts(makeLog(1), 'one-turn')
   assert.equal(p.turns.length, 1)
   assert.ok(p.lanes.length >= 1, '单轮也应有泳道')
 })
 
 await test('空会话不崩溃，且下游取值安全', async () => {
-  const p = await buildSessionPayloadParts([], 'empty')
+  const p = await buildSessionParts([], 'empty')
   assert.equal(p.turns.length, 0)
   assert.equal(p.lanes.length, 0)
-  // columnCount 为 0 是正确语义（没有话题），客户端用 Math.max(1, …) 兜底。
-  // 这里验证"不抛异常 + 数值合法"，而不是强求 >= 1。
-  assert.ok(Number.isFinite(p.graph.columnCount) && p.graph.columnCount >= 0)
-  assert.equal(p.graph.nodes.length, 0)
-  assert.equal(p.graph.edges.length, 0)
 })
 
 await test('200 轮在 5 秒内完成（性能不随环境退化）', async () => {
   const t0 = Date.now()
-  const p = await buildSessionPayloadParts(makeLog(200), 'big')
+  const p = await buildSessionParts(makeLog(200), 'big')
   const ms = Date.now() - t0
   assert.equal(p.turns.length, 200)
   assert.ok(ms < 5000, `应 5 秒内，实际 ${ms}ms`)
@@ -109,7 +110,7 @@ await test('未知事件类型被忽略（向前兼容新版本日志）', async
   const events = makeLog(3)
   // 插入本插件不认识的事件
   events.splice(2, 0, { type: 'future/unknown-event', seq: 99, time: 5, data: { x: 1 } })
-  const p = await buildSessionPayloadParts(events, 'compat')
+  const p = await buildSessionParts(events, 'compat')
   assert.equal(p.turns.length, 3, '未知事件不应影响折叠')
 })
 
@@ -172,7 +173,7 @@ await test('会话标题是任意语言都能归类', () => {
 
 // ── 冷启动（新装环境，没有任何历史数据）────────────────────────────
 await test('全新环境：空会话不崩', async () => {
-  const p = await buildSessionPayloadParts([], 'brand-new')
+  const p = await buildSessionParts([], 'brand-new')
   assert.equal(p.turns.length, 0)
   assert.equal(p.lanes.length, 0)
 })
@@ -182,10 +183,9 @@ await test('全新环境：空会话列表能出空树', () => {
 })
 
 await test('全新环境：第一轮对话就能出图', async () => {
-  const p = await buildSessionPayloadParts(makeLog(1), 'first-ever')
+  const p = await buildSessionParts(makeLog(1), 'first-ever')
   assert.equal(p.turns.length, 1)
   assert.ok(p.lanes.length >= 1)
-  assert.ok(p.graph.nodes.length >= 1)
 })
 
 await test('全新环境：单个会话也能归类', () => {

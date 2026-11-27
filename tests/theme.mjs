@@ -195,36 +195,19 @@ test('THEMES 常量完整', () => {
   assert.deepEqual(THEMES, ['auto', 'light', 'dark'])
 })
 
-// ── 布局锁定（第 1 条需求的回归）─────────────────────────────────────
-test('根容器不再用固定 min-height 撑高面板', () => {
-  const rootRule = clientSrc.match(/\.dsh_tm_root\{[^}]*\}/)
-  assert.ok(rootRule !== null, '应存在 .dsh_tm_root 规则')
-  assert.ok(!/min-height:\s*\d+px/.test(rootRule[0]),
-    `根容器不应有固定像素 min-height（会把面板撑出视口）：${rootRule[0]}`)
-  assert.ok(/min-height:\s*0/.test(rootRule[0]), '应显式 min-height:0')
-  assert.ok(/max-height:\s*100%/.test(rootRule[0]), '应限制最大高度')
+// ── 布局锁定（抽屉容器不撑出视口）─────────────────────────────────────
+test('历史抽屉容器使用 min-height:0 且裁剪外层溢出', () => {
+  const histRule = clientSrc.match(/\.dsh_tm_history\{[^}]*\}/)
+  assert.ok(histRule !== null, '应存在 .dsh_tm_history 规则')
+  assert.ok(/min-height:\s*0/.test(histRule[0]), '应显式 min-height:0')
+  assert.ok(/overflow:\s*hidden/.test(histRule[0]), '外层应裁剪溢出')
 })
 
-test('画布与三栏都不会撑高外层', () => {
-  const canvas = clientSrc.match(/\.dsh_tm_canvas\{[^}]*\}/)
-  assert.ok(canvas !== null)
-  assert.ok(/flex:\s*1 1 0/.test(canvas[0]), '画布应固定占剩余空间')
-  assert.ok(/overflow:\s*hidden/.test(canvas[0]), '画布应裁剪溢出')
-
-  const body = clientSrc.match(/\.dsh_tm_body\{[^}]*\}/)
-  assert.ok(body !== null)
-  assert.ok(/min-height:\s*0/.test(body[0]), 'body 需要 min-height:0 才能正确收缩')
-  assert.ok(/overflow:\s*hidden/.test(body[0]), 'body 应裁剪溢出')
-})
-
-test('左右两栏各自滚动，互不影响', () => {
-  const side = clientSrc.match(/\.dsh_tm_side\{[^}]*\}/)
-  const detail = clientSrc.match(/\.dsh_tm_detail\{[^}]*\}/)
-  assert.ok(side !== null && detail !== null)
-  // 两栏外层都是 overflow:hidden（自己内部再滚）
-  assert.ok(/overflow:\s*hidden/.test(side[0]))
-  assert.ok(/overflow:\s*hidden/.test(detail[0]))
-  assert.ok(/min-height:\s*0/.test(detail[0]), '详情栏需要 min-height:0')
+test('历史正文区内部独立滚动', () => {
+  const body = clientSrc.match(/\.dsh_tm_histbody\{[^}]*\}/)
+  assert.ok(body !== null, '应存在 .dsh_tm_histbody 规则')
+  assert.ok(/min-height:\s*0/.test(body[0]), '正文区需要 min-height:0 才能正确收缩')
+  assert.ok(/overflow-y:\s*auto/.test(body[0]), '正文区应独立纵向滚动')
 })
 
 console.log(`\n${passed} passed, ${failures.length} failed`)

@@ -287,11 +287,12 @@ await test('POST /work-refine-retry：强制带模型重跑，返回与 /works �
     // refineStatus 必须存在且形状正确
     const status = retry.body.value.refineStatus
     assert.ok(status !== null && typeof status === 'object', 'refineStatus 必须存在')
-    assert.deepEqual(
-      Object.keys(status).sort(),
-      ['at', 'attempts', 'reason', 'used'],
-      'refineStatus 必须是契约的四个字段',
-    )
+    // 契约四字段 + ADR-0010 追加的 detail（具体错误原文）。
+    for (const key of ['at', 'attempts', 'reason', 'used']) {
+      assert.ok(key in status, 'refineStatus 必须含契约字段 ' + key)
+    }
+    assert.ok(Object.keys(status).every(k => ['at', 'attempts', 'reason', 'used', 'detail'].includes(k)),
+      '只应有契约字段与 detail，实际 ' + JSON.stringify(Object.keys(status)))
     assert.equal(typeof status.used, 'boolean')
     assert.equal(typeof status.attempts, 'number')
   })

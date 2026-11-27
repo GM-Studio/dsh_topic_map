@@ -187,6 +187,62 @@ await test('maxTokens 不得是 4096 这个病态值（推理模型会截断成�
   })
 })
 
+await test('适配器已缺失的历史路由：不再硬失败，改走可用适配器', async () => {
+  await withTempHome(async () => {
+    const { events } = makeIndependentSessions(2)
+    const ctx = makeCtx(events)
+    // 模拟宿主：只有一个可用 provider，且必须带具体 model 才接受。
+    const llm = {
+      listProviders() { return [{ id: 'good-provider', models: ['good-model'] }] },
+      prepareCall(call) {
+        if (call.provider !== 'good-provider' || call.model !== 'good-model') {
+          throw new Error('no adapter registered for provider "' + call.provider + '"')
+        }
+        return { config: call, stream: async function* () {
+          yield { type: 'text-delta', text: replyFor(clusterIdsIn({ user: String(call.messages[0].content[0].text) })) }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        } }
+      },
+    }
+    ctx.get = name => (name === 'llm' ? llm : (name === 'workspaceRegistry' ? { list: () => [{ id: WS, path: 'E:\\w', title: 'W', sessionIds: Object.keys(events) }] } : undefined))
+    const res = await scanWorkspaceWorks(ctx, WS, { force: true, useModel: true, config: {}, now: BASE_TIME + 3_600_000 })
+    assert.equal(res.refineStatus.used, true, '应降级到可用适配器并成功，实际 ' + JSON.stringify(res.refineStatus))
+    assert.equal(res.refineStatus.reason, 'ok')
+  })
+})
+
+await test('账户余额不足：如实归类为 failed 并带出原文，不谎报成功', async () => {
+  await withTempHome(async () => {
+    const { events } = makeIndependentSessions(2)
+    const ctx = makeCtx(events)
+    const deps = { async askModel() { throw new Error('Insufficient Balance (request_id: abc)') } }
+    const res = await scanWorkspaceWorks(ctx, WS, { force: true, useModel: true, config: {}, deps, now: BASE_TIME + 3_600_000 })
+    assert.equal(res.refineStatus.used, false)
+    assert.equal(res.refineStatus.reason, 'failed')
+    assert.ok(String(res.refineStatus.detail).indexOf('Insufficient Balance') >= 0, '必须带出具体原因，实际 ' + res.refineStatus.detail)
+  })
+})
+
+await test('失败原因要具体可见：detail 不得为空', async () => {
+  await withTempHome(async () => {
+    const { events } = makeIndependentSessions(2)
+    const ctx = makeCtx(events)
+    const deps = { async askModel() { throw new Error('boom 具体原因') } }
+    const res = await scanWorkspaceWorks(ctx, WS, { force: true, useModel: true, config: {}, deps, now: BASE_TIME + 3_600_000 })
+    assert.ok(String(res.refineStatus.detail || '').trim() !== '', 'detail 必须非空')
+    assert.ok(String(res.refineStatus.detail).indexOf('boom') >= 0)
+  })
+})
+
+await test('适配器缺失归类为 no_model（不是 failed）', async () => {
+  await withTempHome(async () => {
+    const { events } = makeIndependentSessions(2)
+    const ctx = makeCtx(events)
+    const deps = { async askModel() { throw new Error('no adapter registered for provider "gone"') } }
+    const res = await scanWorkspaceWorks(ctx, WS, { force: true, useModel: true, config: {}, deps, now: BASE_TIME + 3_600_000 })
+    assert.equal(res.refineStatus.reason, 'no_model', '实际 ' + res.refineStatus.reason)
+  })
+})
 console.log('')
 console.log('refine-adaptive: ' + passed + ' passed, ' + failures.length + ' failed')
 if (failures.length > 0) process.exit(1)

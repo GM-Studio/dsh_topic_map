@@ -78,7 +78,13 @@ export function detectAwaitingHuman(turns, options = {})
 - 长输入**分批/精简**，避免会话多的工作区被超时截断。
 - store 新增 `refineStatus`：
 ```js
-refineStatus: { used: boolean, at: number|null, reason: ''|'ok'|'no_model'|'timeout'|'failed'|'invalid_json'|'running', attempts: number }
+refineStatus: {
+  used: boolean,
+  at: number|null,
+  reason: ''|'ok'|'no_model'|'timeout'|'failed'|'invalid_json'|'running',
+  attempts: number,
+  detail: string,   // 具体错误原文（≤200 字，可为空）——只给枚举等于没说清「到底什么失败了」
+}
 ```
 - `readWorkspaceWorksView` 返回值新增 `refineStatus`。
 - **禁止静默吞错**：失败必须落到 `refineStatus.reason`。

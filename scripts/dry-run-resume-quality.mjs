@@ -59,7 +59,10 @@ function auditStore(store) {
   const sessions = new Set()
   for (const w of works) for (const s of (Array.isArray(w?.sessionIds) ? w.sessionIds : [])) sessions.add(String(s))
 
+  // 只有「未收束」的事才需要下一步：state=done/shelved 的事本来就没有下一步，
+  // 人工确认收口的更不该被强塞一个动作。所以分开统计，别把合理的空当成缺陷。
   let blankNext = 0
+  let blankNextResolved = 0
   let blankStatus = 0
   let decisions = 0
   let crossSession = 0
@@ -69,7 +72,10 @@ function auditStore(store) {
 
   for (const w of works) {
     if (!w) continue
-    if (isBlank(w.nextStep)) blankNext += 1
+    if (isBlank(w.nextStep)) {
+      blankNext += 1
+      if (w.state === 'active' || w.state === 'blocked') blankNextResolved += 1
+    }
     if (isBlank(w.statusSummary)) blankStatus += 1
     decisions += Array.isArray(w.decisions) ? w.decisions.length : 0
     if (Array.isArray(w.sessionIds) && w.sessionIds.length > 1) crossSession += 1
@@ -89,6 +95,7 @@ function auditStore(store) {
     unresolved: unresolved.length,
     worksPerSession: sessions.size === 0 ? 0 : Number((works.length / sessions.size).toFixed(2)),
     blankNext,
+    blankNextResolved,
     blankStatus,
     decisions,
     crossSession,
@@ -110,7 +117,7 @@ function main() {
 
   const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'))
   const rows = []
-  const totals = { sessions: 0, works: 0, unresolved: 0, blankNext: 0, blankStatus: 0, decisions: 0, crossSession: 0, awaiting: 0, excluded: 0, refineUsed: 0, refineFailed: 0 }
+  const totals = { sessions: 0, works: 0, unresolved: 0, blankNext: 0, blankNextResolved: 0, blankStatus: 0, decisions: 0, crossSession: 0, awaiting: 0, excluded: 0, refineUsed: 0, refineFailed: 0 }
 
   for (const f of files) {
     let store = null
@@ -122,6 +129,7 @@ function main() {
     totals.works += r.works
     totals.unresolved += r.unresolved
     totals.blankNext += r.blankNext
+    totals.blankNextResolved += r.blankNextResolved
     totals.blankStatus += r.blankStatus
     totals.decisions += r.decisions
     totals.crossSession += r.crossSession
@@ -139,19 +147,20 @@ function main() {
   console.log('事续接质量体检（只读 · 脱敏）')
   console.log('目录：' + dir)
   console.log('')
-  console.log('工作区   会话  事数  未收束  事/会话  下一步留白  现状留白  决策  跨会话  待确认  未准入  提炼')
+  console.log('工作区   会话  事数  未收束  事/会话  未收束留白  现状留白  决策  跨会话  待确认  未准入  提炼')
   for (const r of rows) {
     const refine = r.refineUsed === true ? 'model' : (r.refineUsed === false ? 'rule(' + (r.refineReason || '?') + ')' : 'n/a')
     console.log(
       [String(r.ws).padEnd(8), String(r.sessions).padStart(4), String(r.works).padStart(5), String(r.unresolved).padStart(6),
-       String(r.worksPerSession).padStart(7), String(r.blankNext).padStart(10), String(r.blankStatus).padStart(8),
+       String(r.worksPerSession).padStart(7), String(r.blankNextResolved).padStart(10), String(r.blankStatus).padStart(8),
        String(r.decisions).padStart(4), String(r.crossSession).padStart(6), String(r.awaiting).padStart(6),
        String(r.excluded).padStart(6), refine].join('  '),
     )
   }
   console.log('')
   console.log('合计：会话 ' + totals.sessions + ' / 事 ' + totals.works + ' / 未收束 ' + totals.unresolved
-    + ' / 下一步留白 ' + totals.blankNext + ' / 现状留白 ' + totals.blankStatus
+    + ' / 未收束留白 ' + totals.blankNextResolved + '（全部事留白 ' + totals.blankNext + '，含已收束的合理空）'
+    + ' / 现状留白 ' + totals.blankStatus
     + ' / 决策 ' + totals.decisions + ' / 跨会话 ' + totals.crossSession
     + ' / 待确认 ' + totals.awaiting + ' / 未准入 ' + totals.excluded)
   console.log('提炼：成功 ' + totals.refineUsed + ' 个工作区，失败 ' + totals.refineFailed + ' 个工作区')

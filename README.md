@@ -74,7 +74,10 @@
 - **三类自然拐点（非阻塞）**：切换话题（`topic_switch`）、疑似收尾或卡住（`likely_settled_or_blocked`）、重返未收束会话（`revisit_unresolved`），均以顶部轻条提示，可 1 秒确认或忽略；
 - **自动沉降**：超过 `dormantDays`（默认 14 天，`0` 表示关闭）无活动的**推测态且未置顶**的事自动转入 `已搁置`，重新聊到时自动浮回；
 - **一次盘点 + 增量永不洗牌**：工作区冷启动一次性按硬信号（分叉血缘、引用句柄、业务文件重叠，自动过滤 `package.json` 等通用配置文件）叠加可选模型语义盘点存量；之后新会话只按 **L1 硬血缘 → L2 文件重叠 → L3 同工作区未收束事语义匹配** 增量挂载；
-- **三条防污染边界**：子代理与自动化会话默认排除在自动立事之外；撞上已锁定「已完成」的旧事时不静默改写，仅出重开建议条；同一件事允许挂多个并行活跃会话并按工作区串行防抖更新。
+- **防污染边界（含三元触发来源模型，见 [ADR-0005](<docs/adr/0005-trigger-sources-fold-continuations-exclude-subagents.md>)）**：
+  - **子代理与自动化独立会话全链路排除**：`header.origin === 'subagent'`、`delegationDepth >= 1` 以及定时/系统自动化独立会话在源头彻底排除出索引构建、跨会话检索、自动分类、工作区统计与「事」盘点，不污染工作区记忆；
+  - **异步续跑回调轮折叠吸收**：父会话内无人类输入的 `subagent-settled` / `agent-message` / `team-message` / `goal` / `tool-jobs` 等异步续跑回调轮不单列，自动折叠回发起它的前一个 `human` 轮（保留原始 `turn`/`seq` 定位并记录 `foldedTurns`），合并其工具、命令、用量、文件变更快照与最终收口结论；
+  - **旧事保护与并发写入**：撞上已锁定「已完成」的旧事时不静默改写，仅出重开建议条；同一件事允许挂多个并行活跃会话并按工作区串行防抖更新。
 
 ### 2 决策按需累积
 
@@ -130,7 +133,7 @@ dsh plugin --profile desktop add link:E:/dsh_plugin
 │ Host 侧（lib/index.js）                                     │
 │   ├ 事核心域：segment · work-model · work-merge · handoff   │
 │   │           work-store（串行原子写 / 增量同步 / 事级展开） │
-│   ├ 检索底座：turn-index（schema 5）· search-index · rank   │
+│   ├ 检索底座：turn-index（schema 6）· search-index · rank   │
 │   ├ 摘要与引用：turn-digest · expand-preview · history_turn │
 │   ├ 自动分类：category-store · organize · category-auto     │
 │   └ 动作与统计：outline · fork · brief · workspace-stats    │
@@ -151,7 +154,7 @@ dsh plugin --profile desktop add link:E:/dsh_plugin
 ├── works/<workspaceId>.json           工作区「事」与「段」物化快照 + 人工确认锁定 / 排除段 / 交接血缘
 ├── work-ledger/<sessionId>.json       事级 Wire 展开（〔work:<workId>〕）幂等账本
 ├── index/
-│   ├── sessions/<sessionId>.jsonl     轮次索引（schema 5：首行 meta，其后每行一轮）
+│   ├── sessions/<sessionId>.jsonl     轮次索引（schema 6：首行 meta，其后每行一逻辑轮；支持三元触发来源模型）
 │   └── labels/<workspaceId>.json      轮次状态标签（followUp / solved / starred）与备注
 ├── digests/<sessionId>#<turn>.json    轮次摘要缓存（按 endSeq + level 命中）
 ├── categories/<workspaceId>.json      分类树、归类与人工锁定
@@ -161,7 +164,7 @@ dsh plugin --profile desktop add link:E:/dsh_plugin
 └── briefs/*.md                        生成的 Markdown 简报
 ```
 
-索引与推测态物化快照**随时可重建**——以宿主会话日志为唯一事实源；用户确认锁定数据与交接血缘受独立保护，绝不被后台推断静默覆盖。
+轮次索引自 **schema 6** 起采用三元触发来源模型（见 [ADR-0005](<docs/adr/0005-trigger-sources-fold-continuations-exclude-subagents.md>)）：自动折叠 `subagent-settled` / `agent-message` / `goal` 等异步续跑回调轮并按文件去重合并其变更快照，同时彻底排除 `origin: 'subagent'` 与定时自动化独立会话（旧 schema 索引会自动触发增量重建）。索引与推测态物化快照**随时可重建**——以宿主会话日志为唯一事实源；用户确认锁定数据与交接血缘受独立保护，绝不被后台推断静默覆盖。
 
 ---
 
@@ -240,6 +243,7 @@ node scripts/test-all.mjs         # 全量测试汇总（同时检查退出码�
 - [ADR-0002](<docs/adr/0002-decisions-are-first-class.md>) — 决策是事内一等但按需累积的事件
 - [ADR-0003](<docs/adr/0003-inferred-state-inflection-confirm-and-incremental-merge.md>) — 双态推断、拐点轻确认与「一次盘点 + 增量挂载」
 - [ADR-0004](<docs/adr/0004-lossless-three-layer-handoff.md>) — 三层防失真续接与交接协议
+- [ADR-0005](<docs/adr/0005-trigger-sources-fold-continuations-exclude-subagents.md>) — 三元触发来源模型：折叠异步续跑回调轮，彻底排除子代理与自动化独立会话
 - 早期历史索引阶段设计存档位于 `openspec/changes/history-index/`（供查阅底座演进背景）
 
 ---
@@ -256,4 +260,4 @@ node scripts/test-all.mjs         # 全量测试汇总（同时检查退出码�
 
 ## 版本沿革
 
-- `v1.0.0` — 确立「事的续接 + 话题回溯」双层领域模型；落地段/事/决策/交接核心域（Host 持久化、10 个 `/work*` 端点、事级 Wire 展开、只读干跑诊断）、跨会话检索（索引 schema 5）、自动分类、引用体系与历史轨；清理旧 v0 泳道图与三栏主面板遗产。
+- `v1.0.0` — 确立「事的续接 + 话题回溯」双层领域模型；落地段/事/决策/交接核心域（Host 持久化、10 个 `/work*` 端点、事级 Wire 展开、只读干跑诊断）、跨会话检索（索引 schema 6，支持三元触发来源模型：折叠 `subagent-settled` / `agent-message` / `goal` 等异步续跑回调轮并合并文件变更，彻底排除 `origin: 'subagent'` 与定时自动化独立会话）、自动分类、引用体系与历史轨；清理旧 v0 泳道图与三栏主面板遗产。

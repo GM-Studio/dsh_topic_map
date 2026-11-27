@@ -14,6 +14,7 @@ import { join } from 'node:path'
 
 import { scanWorkspaceWorks, readWorkspaceWorksView } from '../lib/work-store.js'
 import { resolveWorksViewState, emptyStateText, workBoardModel } from '../lib/work-view.js'
+import { isAutomatedSession } from '../lib/segment.js'
 
 let passed = 0
 const failures = []
@@ -138,6 +139,23 @@ await test('有对话但确实无事 → 仍是 no_unresolved（不能一律推�
   assert.equal(b.empty.kind, 'no_unresolved', '实际 ' + b.empty.kind)
 })
 
+console.log('')
+console.log('=== 3. isAutomatedSession 的 ignoreEmpty 必须真的生效 ===')
+
+await test('空会话（无标题/无首轮/0 轮）默认仍判为自动化（向后兼容）', () => {
+  const verdict = isAutomatedSession({ turns: [], title: '', firstPrompt: '', turnCount: 0 })
+  assert.equal(verdict, true, '不传 ignoreEmpty 时行为不得改变')
+})
+
+await test('传 ignoreEmpty 后，空会话不再被判成自动化（真机漏读的根因）', () => {
+  const verdict = isAutomatedSession({ turns: [], title: '', firstPrompt: '', turnCount: 0 }, { ignoreEmpty: true })
+  assert.equal(verdict, false, '空会话必须能被单独计数，而不是被当成自动化会话丢掉')
+})
+
+await test('真正的子代理会话即使传 ignoreEmpty 也必须仍被排除', () => {
+  assert.equal(isAutomatedSession({ origin: 'subagent', turns: [], turnCount: 0 }, { ignoreEmpty: true }), true)
+  assert.equal(isAutomatedSession({ isSubagent: true, turns: [{ turn: 1 }] }, { ignoreEmpty: true }), true)
+})
 console.log('')
 if (failures.length > 0) { console.log('readonly-and-empty-sessions: ' + passed + ' passed, ' + failures.length + ' FAILED'); process.exit(1) }
 console.log('readonly-and-empty-sessions: ' + passed + ' passed, 0 failed')

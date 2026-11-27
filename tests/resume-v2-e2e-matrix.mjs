@@ -294,6 +294,67 @@ await scenario('下一步', '任何输入下都不留白且不含占位空话', 
   }
 })
 
+console.log('\n=== 6. 空会话与只读巡检（ADR-0011 / ADR-0012）===')
+
+await scenario('空会话', '有内容 + 空会话混合：对话数与空会话数分开统计', async () => {
+  await withHome(async () => {
+    const ctx = makeCtx({
+      'sess-rich': makeEvents([codeSession, codeSession]),
+      'sess-empty-1': [],
+      'sess-empty-2': [],
+    })
+    const res = await scanWorkspaceWorks(ctx, WS, { force: true, useModel: false, config: {}, now: BASE + 3_600_000 })
+    assert.equal(res.conversationCount, 1, '有对话的会话数，实际 ' + res.conversationCount)
+    assert.equal(res.emptySessionCount, 2, '空会话数，实际 ' + res.emptySessionCount)
+  })
+})
+
+await scenario('空会话', '全是空会话 → 视图给出 no_content，不谎称「没有未收束的事」', async () => {
+  await withHome(async () => {
+    const ctx = makeCtx({ 'sess-e1': [], 'sess-e2': [], 'sess-e3': [] })
+    await scanWorkspaceWorks(ctx, WS, { force: true, useModel: false, config: {}, now: BASE })
+    const view = await readWorkspaceWorksView(ctx, WS, { config: {}, now: BASE })
+    assert.equal(view.conversationCount, 0)
+    assert.equal(view.emptySessionCount, 3)
+    const state = resolveWorksViewState({
+      boundWorkspaceId: WS, dataWorkspaceId: WS,
+      raw: view, error: '', scanning: false, refining: false,
+    })
+    assert.equal(state.emptyKind, 'no_content', '实际 ' + state.emptyKind)
+  })
+})
+
+await scenario('空会话', '真子代理会话不会被当成空会话放进来', async () => {
+  await withHome(async () => {
+    const ctx = makeCtx({ 'sess-human': makeEvents([codeSession]), 'sess-sub': [] })
+    const baseList = ctx.sessionQuery.listSessions
+    ctx.sessionQuery.listSessions = async () => [
+      { header: { id: 'sess-human' } },
+      { header: { id: 'sess-sub', origin: 'subagent', delegationDepth: 1 } },
+    ]
+    baseList()
+    const res = await scanWorkspaceWorks(ctx, WS, { force: true, useModel: false, config: {}, now: BASE + 3_600_000 })
+    assert.equal(res.conversationCount, 1)
+    assert.equal(res.emptySessionCount, 0, '子代理会话必须被排除，不能算成空会话')
+    assert.equal(res.excludedSessionCount, 1, '被排除的会话要如实计数')
+  })
+})
+
+await scenario('只读', '切换巡检工作区不改写权限：视图状态与归属无关', () => {
+  // 视角（在看哪个区）与身份（属于哪个区）是两件事：同一份数据换个视角看，结论不变。
+  const raw = { initialized: true, unresolved: [{ id: 'a' }], conversationCount: 5, emptySessionCount: 0 }
+  const asOwn = resolveWorksViewState({ boundWorkspaceId: 'w-a', dataWorkspaceId: 'w-a', raw, error: '', scanning: false, refining: false })
+  assert.equal(asOwn.status, 'ready')
+  assert.equal(asOwn.unresolvedCount, 1)
+})
+
+await scenario('只读', '切区瞬间仍必须清态（只看不串台）', () => {
+  const raw = { initialized: true, unresolved: [{ id: 'a' }], conversationCount: 5, emptySessionCount: 0 }
+  const switching = resolveWorksViewState({ boundWorkspaceId: 'w-own', dataWorkspaceId: 'w-other', raw, error: '', scanning: false, refining: false })
+  assert.equal(switching.status, 'loading', '切换中不得展示旧区数据')
+  assert.equal(switching.showStale, false)
+  assert.equal(switching.unresolvedCount, 0)
+})
 console.log('')
 if (failures.length > 0) { console.log('resume-v2-e2e-matrix: ' + passed + ' passed, ' + failures.length + ' FAILED'); process.exit(1) }
 console.log('resume-v2-e2e-matrix: ' + passed + ' passed, 0 failed')

@@ -826,6 +826,88 @@ await test('历史轨两级目录：标准/宽档渲染段头且点段头跳首�
   dispose()
 })
 
+function mergeSplitPayload() {
+  return {
+    workspaceId: 'ws-1',
+    initialized: true,
+    refining: false,
+    cards: {
+      unresolved: [
+        { id: 'w-a', title: '事 A', state: 'active', confidence: 'inferred', pinned: false, reviewStatus: 'reviewed',
+          statusLine: 's', nextStep: 'n', lastActivityAt: NOW - 1000, segmentCount: 2,
+          segments: [{ id: 'seg-a1', title: '段一' }, { id: 'seg-a2', title: '段二' }] },
+        { id: 'w-b', title: '事 B', state: 'active', confidence: 'inferred', pinned: false, reviewStatus: 'reviewed',
+          statusLine: 's', nextStep: 'n', lastActivityAt: NOW - 2000, segmentCount: 1 },
+      ],
+      settled: [],
+      pendingReviewCount: 0,
+    },
+    works: [],
+  }
+}
+
+await test('合并：点「合并」出现目标选择器，选谁就把本卡并进谁', async () => {
+  const calls = []
+  const { runtime } = await mountWorks({
+    payload: mergeSplitPayload(),
+    onFetch: (action, body) => {
+      if (action === 'work-merge') { calls.push(body); return { value: { work: { id: 'w-b', title: '事 B' } } } }
+      return undefined
+    },
+  })
+  await runtime.settle()
+  const mergeBtn = byData(runtime.tree, 'data-action', 'merge-work')[0]
+  assert.ok(mergeBtn !== undefined, '应有「合并」按钮')
+  click(mergeBtn)
+  await runtime.settle()
+  const picker = byData(runtime.tree, 'data-pick', 'merge')[0]
+  assert.ok(picker !== undefined, '点合并后应出现目标选择器')
+  const targets = byData(runtime.tree, 'data-action', 'merge-target')
+  assert.ok(targets.length >= 1, '选择器里应列出其它事')
+  click(targets[0])
+  await runtime.settle()
+  assert.equal(calls.length, 1, '应调用一次 work-merge')
+  assert.equal(calls[0].sourceWorkId, 'w-a', 'source 是本卡')
+  assert.equal(calls[0].targetWorkId, 'w-b', 'target 是被选中的那件')
+  runtime.unmount()
+})
+
+await test('拆段：点「拆段」出现段选择器，选谁就拆谁', async () => {
+  const calls = []
+  const { runtime } = await mountWorks({
+    payload: mergeSplitPayload(),
+    onFetch: (action, body) => {
+      if (action === 'work-split') { calls.push(body); return { value: { work: { id: 'w-new' } } } }
+      return undefined
+    },
+  })
+  await runtime.settle()
+  const splitBtn = byData(runtime.tree, 'data-action', 'split-work')[0]
+  assert.ok(splitBtn !== undefined, '多段的事应有「拆段」按钮')
+  click(splitBtn)
+  await runtime.settle()
+  const segs = byData(runtime.tree, 'data-action', 'split-segment')
+  assert.equal(segs.length, 2, '两段就应列出两个可拆目标')
+  click(segs[1])
+  await runtime.settle()
+  assert.equal(calls.length, 1, '应调用一次 work-split')
+  assert.equal(calls[0].workId, 'w-a')
+  assert.equal(calls[0].segmentId, 'seg-a2')
+  runtime.unmount()
+})
+
+await test('只读巡检：合并与拆段按钮同样禁用', async () => {
+  const { runtime } = await mountWorks({ payload: mergeSplitPayload(), readonly: true })
+  await runtime.settle()
+  for (const action of ['merge-work', 'split-work']) {
+    const nodes = byData(runtime.tree, 'data-action', action)
+    assert.ok(nodes.length > 0, '只读区也应渲染 ' + action + '（要能看见它为什么不能点）')
+    for (const node of nodes) {
+      assert.equal(node.props.disabled, true, '只读区 ' + action + ' 必须禁用')
+    }
+  }
+  runtime.unmount()
+})
 await test('只读巡检：卡片上的写按钮全部禁用，交接两个保持可用，并给出说明条', async () => {
   const { runtime } = await mountWorks({ readonly: true })
   await runtime.settle()

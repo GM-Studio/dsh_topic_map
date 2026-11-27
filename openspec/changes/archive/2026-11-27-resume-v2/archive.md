@@ -93,8 +93,13 @@
 
 - [dry-run-resume-quality.mjs](<../../../../scripts/dry-run-resume-quality.mjs>)：只读、脱敏的续接质量体检，输出下一步留白率 / 决策数 / 跨会话合并 / 待确认 / 未准入原因 / 提炼状态，用于前后对比。
 
-## 6. 遗留与后续
+## 6. 原遗留问题与收口
 
-1. **两个工作区语义提炼仍不可用**：`specgate` 的会话历史只记 provider 未记 model，`deepseek-official` 等兜底 provider 无可用 model id，因此 `refineStatus.reason = no_model`（界面可见、可重试）。需在设置里指定 provider + model，或让该工作区产生一次新会话以写入新的 `request/header`。
-2. **只读区的「合并 / 拆段」尚未在界面上出现**：当前卡片动作集里没有这两个入口，后端端点已就绪；等入口做出来时需一并纳入只读禁用清单。
-3. **级联更新只验证到规则与接线层**：抽屉靠每秒轮询 `data-conversation-session` 发现会话切换，未在浏览器里实测真实切换动作；若实测不跟，应改为直接订阅 `uiConversation` 服务。
+三条遗留已在同一变更内全部解决：
+
+1. **语义提炼在缺 model 的工作区不可用** → 已修。根因是选路只取「第一条非空」而不校验 provider+model 是否完整。现在 `resolveWorkspaceRoute` 只接受**完整且适配器可用**的路由，并可从其它工作区的会话借用；`listRouteCandidates` 返回多条候选，提炼层在配额类失败时依次换用。
+   **真机结果**：`specgate` 从 `no_model` → `ok used=true attempts=2`（第一条候选账户欠费，自动换到第二条）。有会话的 6 个工作区现在 **6/6 提炼成功**。
+
+2. **只读区的「合并 / 拆段」入口不存在** → 已补。卡片动作条新增「合并」（选目标事后合并）与「拆段」（仅当 `segmentCount >= 2` 时出现，选哪段就拆哪段），两者接后端已有的 `work-merge` / `work-split`，并**同样纳入只读禁用清单**（含后端 403 校验）。
+
+3. **级联更新只验证到接线层** → 根因已找到并修复。抽屉用 `useState(providedSession)` 只取初值，**宿主传入的 `sessionId` 后续变化永远不会同步**；补了 prop 同步 effect，并按「是否真的换了会话」决定是否把巡检视角跟回本区。DOM 轮询路径保留为无 prop 时的后备。

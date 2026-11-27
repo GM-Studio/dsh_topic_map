@@ -159,6 +159,20 @@ await test('跨区重新盘点与重试提炼也算写 → 403', async () => {
   })
 })
 
+await test('跨区合并 / 拆段同样是写 → 403', async () => {
+  await withHome(async () => {
+    const { handler } = await bootCtx()
+    const merge = await callRoute(handler, 'POST', 'work-merge', {
+      workspaceId: WS_B, targetWorkId: 'w-x', sourceWorkId: 'w-y', requesterSessionId: 'belong-A',
+    })
+    assert.equal(merge.status, 403, 'work-merge 必须被拦，实际 ' + merge.status)
+    const split = await callRoute(handler, 'POST', 'work-split', {
+      workspaceId: WS_B, workId: 'w-x', segmentId: 'seg-1', requesterSessionId: 'belong-A',
+    })
+    assert.equal(split.status, 403, 'work-split 必须被拦，实际 ' + split.status)
+  })
+})
+
 await test('读操作不受限：跨区 /works 仍能读', async () => {
   await withHome(async () => {
     const { handler } = await bootCtx()

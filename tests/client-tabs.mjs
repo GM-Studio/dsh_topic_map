@@ -8,7 +8,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { readClient, extractFunction, makeRunner } from './client-harness.mjs'
+import { readClient, extractFunction, extractAssignment, makeRunner } from './client-harness.mjs'
 
 const src = readClient()
 const { test, finish } = makeRunner('client-tabs')
@@ -84,6 +84,33 @@ await test('抽屉状态：默认打开，宽度按视口 30% 计算，开关可
   const second = factory()
   assert.equal(second.snapshot().open, false, '开关按 localStorage 还原')
   assert.equal(second.snapshot().collapsed, true)
+})
+
+await test('RIGHT_TABS 升级为 4 页签：［续接］［历史］［统计］［设置］且默认首开续接', async () => {
+  const RIGHT_TABS = new Function(
+    'WORKS_ID', 'WORKS_KIND', 'WORKS_TITLE',
+    'HISTORY_ID', 'HISTORY_KIND', 'HISTORY_TITLE',
+    'STATS_ID', 'STATS_KIND', 'STATS_TITLE',
+    'SETTINGS_ID', 'SETTINGS_KIND', 'SETTINGS_TITLE',
+    `var RIGHT_TABS = ${extractAssignment(src, 'RIGHT_TABS')};return RIGHT_TABS`,
+  )(
+    'dsh-topic-map:works', 'topic-map-works', '续接',
+    'dsh-topic-map:history', 'topic-map-history', '历史检索',
+    'dsh-topic-map:stats', 'topic-map-stats', '统计',
+    'dsh-topic-map:settings', 'topic-map-settings', '设置',
+  )
+  assert.deepEqual(
+    RIGHT_TABS.map(tab => [tab.kind, tab.title]),
+    [
+      ['topic-map-works', '续接'],
+      ['topic-map-history', '历史'],
+      ['topic-map-stats', '统计'],
+      ['topic-map-settings', '设置'],
+    ],
+  )
+  assert.ok(src.includes("var WORKS_ID = 'dsh-topic-map:works'"))
+  assert.ok(src.includes("var WORKS_KIND = 'topic-map-works'"))
+  assert.ok(src.includes("var WORKS_TITLE = '续接'"))
 })
 
 finish()

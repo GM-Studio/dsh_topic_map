@@ -47,7 +47,7 @@ function usedNames(prefix) {
 console.log('\nbundle')
 
 // ── 嵌入模块 ────────────────────────────────────────────────────────
-for (const name of ['THEME', 'FILTER', 'PM', 'UISTATE', 'FOLD', 'DELIV', 'REPORT', 'GMODE', 'SCAT', 'HITVIEW', 'CITE', 'RAILVIEW', 'STATSFMT', 'SETTINGVIEW', 'CLUEVIEW', 'CHANGESVIEW', 'ROLLBACKPLAN']) {
+for (const name of ['THEME', 'HITVIEW', 'CITE', 'RAILVIEW', 'STATSFMT', 'SETTINGVIEW', 'CLUEVIEW', 'CHANGESVIEW', 'ROLLBACKPLAN', 'WORKVIEW']) {
   test(`${name} 的导出覆盖客户端的全部使用`, () => {
     const block = moduleBlock(name)
     assert.ok(block !== null, `bundle 里找不到 ${name}，生成段缺失`)
@@ -62,16 +62,7 @@ for (const name of ['THEME', 'FILTER', 'PM', 'UISTATE', 'FOLD', 'DELIV', 'REPORT
 // ── 生成段完整存在 ──────────────────────────────────────────────────
 test('所有生成段都在 bundle 里', () => {
   for (const marker of [
-    '从 lib/viewport.js',
     '从 lib/theme.js',
-    '从 lib/filter.js',
-    '从 lib/pm-model.js',
-    '从 lib/ui-state.js',
-    '从 lib/tree-fold.js',
-    '从 lib/deliverables.js',
-    '从 lib/report.js',
-    '从 lib/graph-mode.js',
-    '从 lib/session-category.js',
     '从 lib/hit-view.js',
     '从 lib/cite.js',
     '从 lib/rail-view.js',
@@ -80,6 +71,7 @@ test('所有生成段都在 bundle 里', () => {
     '从 lib/clue-view.js',
     '从 lib/changes-view.js',
     '从 lib/rollback-plan.js',
+    '从 lib/work-view.js',
   ]) {
     assert.ok(src.includes(marker), `缺少生成段：${marker}`)
   }
@@ -125,27 +117,6 @@ function evalEmbedded(name) {
   return module.exports
 }
 
-test('SCAT 嵌入后能真实执行（依赖的抽取函数在同作用域内）', () => {
-  const SCAT = evalEmbedded('SCAT')
-  assert.equal(typeof SCAT.extractJsonArrayOfLength, 'function',
-    'SCAT 必须能访问 model-output 的抽取函数，否则运行时白屏')
-  assert.deepEqual(
-    SCAT.extractJsonArrayOfLength('我先分 [草稿]，答案：["a","b"]', 2),
-    ['a', 'b'],
-    '嵌入后的抽取逻辑应真实可用',
-  )
-})
-
-test('SCAT 的会话识别能真实执行', () => {
-  const SCAT = evalEmbedded('SCAT')
-  assert.equal(SCAT.looksAutomated({ title: '[dsh-mnemon:delegated review]', firstPrompt: '' }), true)
-})
-
-test('GMODE 嵌入后能真实执行', () => {
-  const GMODE = evalEmbedded('GMODE')
-  assert.ok(GMODE.statusColor('done', 0, 'light').includes('hsl('))
-})
-
 test('CITE 嵌入后能真实执行（引用块与预算）', () => {
   const CITE = evalEmbedded('CITE')
   const built = CITE.buildCite({
@@ -184,6 +155,7 @@ for (const [name, file] of [
   ['CLUEVIEW', 'clue-view.js'],
   ['CHANGESVIEW', 'changes-view.js'],
   ['ROLLBACKPLAN', 'rollback-plan.js'],
+  ['WORKVIEW', 'work-view.js'],
 ]) {
   test(`${name} 嵌入段与 lib/${file} 逐字节一致`, () => {
     const block = moduleBlock(name)
@@ -195,7 +167,7 @@ for (const [name, file] of [
 
 test('RAILVIEW 嵌入后能真实执行，且导出覆盖接管层的全部 view.* 调用', () => {
   const RAILVIEW = evalEmbedded('RAILVIEW')
-  for (const name of ['tierOf', 'snapWidth', 'turnOfLabel', 'rowsOf', 'activeIndexOf', 'anchorFor', 'selfCheck']) {
+  for (const name of ['tierOf', 'snapWidth', 'turnOfLabel', 'rowsOf', 'activeIndexOf', 'anchorFor', 'selfCheck', 'segmentGroupsOf']) {
     assert.equal(typeof RAILVIEW[name], 'function', `RAILVIEW.${name} 必须是函数，否则运行时白屏`)
   }
   assert.equal(RAILVIEW.TIER_WIDTHS.hair, 40)
@@ -311,6 +283,27 @@ test('ROLLBACKPLAN 嵌入后能真实执行（四态 / 文本）', () => {
   const text = ROLLBACKPLAN.formatPlan(preview.plan)
   assert.ok(text.includes('✓ 可回滚  a.js'))
   assert.ok(text.includes('⚠ 已被修改  c.js'))
+})
+
+test('WORKVIEW 嵌入后能真实执行（卡片 / 面板 / 拐点 / 重开）', () => {
+  const WORKVIEW = evalEmbedded('WORKVIEW')
+  for (const name of ['formatWorkCard', 'workBoardModel', 'formatInflectionBanner', 'formatReopenBanner', 'formatRelativeTime']) {
+    assert.equal(typeof WORKVIEW[name], 'function', `WORKVIEW.${name} 必须是函数`)
+  }
+  const now = new Date(2026, 10, 27, 15, 0, 0, 0).getTime()
+  const board = WORKVIEW.workBoardModel({
+    unresolved: [{ id: 'w-1', title: '测试工作', state: 'active', statusLine: '正在推进', nextStep: '跑测试', lastActivityAt: now - 120000 }],
+    settled: [{ id: 'w-2', title: '旧工作', state: 'done', lastActivityAt: now - 3600000 }],
+    pendingReviewCount: 1,
+    inflection: { kind: 'topic_switch', workId: 'w-1', title: '测试工作', suggestedState: 'done' },
+    reopenSuggestions: [{ relatedDoneWorkId: 'w-2', relatedDoneWorkTitle: '旧工作', reason: 'files' }],
+  }, { now })
+  assert.equal(board.cards.length, 1)
+  assert.equal(board.cards[0].timeLabel, '2 分钟前')
+  assert.equal(board.settledSection.count, 1)
+  assert.ok(board.pendingReviewBanner !== null)
+  assert.ok(board.inflectionBanner !== null)
+  assert.equal(board.reopenBanners.length, 1)
 })
 
 test('接管层已接进 apply（不是写完忘了挂）', () => {

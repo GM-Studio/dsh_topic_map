@@ -2,10 +2,9 @@
  * 检查 client bundle 里嵌入的模块导出是否覆盖客户端的全部使用。
  *
  * 为什么需要这个脚本：`lib/client.js` 是单文件 bundle，它通过
- * `THEME.xxx` / `FILTER.xxx` / `PM.xxx` 这样访问外部模块，而这些模块是
+ * `THEME.xxx` / `HITVIEW.xxx` / `RAILVIEW.xxx` 这样访问外部模块，而这些模块是
  * **文本嵌入**的——导出的名字列表是脚本里手写的。手写清单漏一个函数，
- * 运行时就是 `TypeError: PM.inferFromEvidence is not a function`，
- * 整个面板白屏，而单元测试全绿（它们测的是 lib/ 里的源码，不是 bundle）。
+ * 运行时就是 `TypeError`，整个界面白屏，而单元测试全绿（它们测的是 lib/ 里的源码，不是 bundle）。
  *
  * 这个脚本把"客户端用到的"和"bundle 里导出的"对一遍，任何一个缺失就让
  * 构建失败。白屏这类问题应该在构建时暴露，而不是等用户看到空白页。
@@ -46,9 +45,8 @@ function usedNames(prefix) {
 }
 
 const MODULES = [
-  'THEME', 'FILTER', 'PM', 'UISTATE', 'FOLD', 'DELIV', 'REPORT', 'GMODE', 'SCAT',
-  'HITVIEW', 'CITE', 'RAILVIEW', 'STATSFMT', 'SETTINGVIEW',
-  'CLUEVIEW', 'CHANGESVIEW', 'ROLLBACKPLAN',
+  'THEME', 'HITVIEW', 'CITE', 'RAILVIEW', 'STATSFMT', 'SETTINGVIEW',
+  'CLUEVIEW', 'CHANGESVIEW', 'ROLLBACKPLAN', 'WORKVIEW',
 ]
 let failed = false
 

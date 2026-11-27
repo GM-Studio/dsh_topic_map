@@ -17,6 +17,7 @@ import {
   activeIndexOf,
   anchorFor,
   rowsOf,
+  segmentGroupsOf,
   selfCheck,
   snapWidth,
   tierOf,
@@ -242,6 +243,104 @@ test('selfCheck：按钮都缺 data-index → 不接管，返回原因', () => {
 test('selfCheck：轮号解析不出不算失配（可顺序编号降级）', () => {
   const result = selfCheck({ container: {}, buttons: [{ dataIndex: '0' }, { dataIndex: '1', ariaLabel: '???', turn: null }] })
   assert.equal(result.ok, true)
+})
+
+// ── 段头 → 轮次行两级目录 ────────────────────────────────────────────
+test('segmentGroupsOf：将 rows 与 segments 组装成「段头 → 轮次行」两级目录', () => {
+  const rows = rowsOf([
+    { turn: 1, promptHead: '开场讨论架构' },
+    { turn: 2, promptHead: '确认接口字段' },
+    { turn: 3, promptHead: '排查构建失败', ariaCurrent: 'true' },
+    { turn: 4, promptHead: '修复并补单测' },
+  ])
+  const segments = [
+    {
+      id: 'seg-1',
+      title: '架构讨论',
+      startTurn: 1,
+      endTurn: 2,
+      kindCandidate: 'chat',
+      hasError: false,
+    },
+    {
+      id: 'seg-2',
+      title: '排查构建失败',
+      startTurn: 3,
+      endTurn: 4,
+      kindCandidate: 'work',
+      errorTurns: [3],
+    },
+  ]
+
+  const groups = segmentGroupsOf(rows, segments)
+  assert.equal(groups.length, 2)
+
+  assert.equal(groups[0].id, 'seg-1')
+  assert.equal(groups[0].title, '架构讨论')
+  assert.equal(groups[0].startTurn, 1)
+  assert.equal(groups[0].endTurn, 2)
+  assert.equal(groups[0].turnCount, 2)
+  assert.equal(groups[0].kindCandidate, 'chat')
+  assert.equal(groups[0].hasError, false)
+  assert.equal(groups[0].active, false)
+  assert.deepEqual(groups[0].rows.map(r => r.turn), [1, 2])
+
+  assert.equal(groups[1].id, 'seg-2')
+  assert.equal(groups[1].title, '排查构建失败')
+  assert.equal(groups[1].startTurn, 3)
+  assert.equal(groups[1].endTurn, 4)
+  assert.equal(groups[1].turnCount, 2)
+  assert.equal(groups[1].kindCandidate, 'work')
+  assert.equal(groups[1].hasError, true)
+  assert.equal(groups[1].active, true, '含活动轮次的段必须标为 active: true')
+  assert.deepEqual(groups[1].rows.map(r => r.turn), [3, 4])
+})
+
+test('segmentGroupsOf：无 segments 或未覆盖任何行时平滑退回空数组', () => {
+  const rows = rowsOf([{ turn: 1 }, { turn: 2 }])
+  assert.deepEqual(segmentGroupsOf(rows, null), [])
+  assert.deepEqual(segmentGroupsOf(rows, undefined), [])
+  assert.deepEqual(segmentGroupsOf(rows, []), [])
+  assert.deepEqual(segmentGroupsOf([], [{ id: 'seg-1', startTurn: 1, endTurn: 2 }]), [])
+  assert.deepEqual(segmentGroupsOf(rows, [{ id: 'seg-9', startTurn: 10, endTurn: 12 }]), [])
+})
+
+test('segmentGroupsOf：支持 turnRange / 缺省标题兜底 / 孤立未覆盖轮次不丢失', () => {
+  const rows = rowsOf([
+    { turn: 1, promptHead: '前导问题' },
+    { turn: 2, promptHead: '主体工作' },
+    { turn: 3, promptHead: '收尾验证', active: true },
+    { turn: 4, promptHead: '新增未切段轮次' },
+  ])
+  const segments = [
+    { turnRange: [2, 3], kindCandidate: 'work' },
+  ]
+  const groups = segmentGroupsOf(rows, segments)
+  // 应覆盖所有行（前导 + 命中段 + 尾部），不静默丢失轮次
+  const allTurns = groups.flatMap(g => g.rows.map(r => r.turn))
+  assert.deepEqual(allTurns, [1, 2, 3, 4])
+  const main = groups.find(g => g.startTurn === 2 && g.endTurn === 3)
+  assert.ok(main, '目标段必须存在')
+  assert.equal(main.title, '第 2–3 轮')
+  assert.equal(main.kindCandidate, 'work')
+  assert.equal(main.active, true)
+  assert.equal(main.turnCount, 2)
+})
+
+test('segmentGroupsOf：rows 中带 hasError 或 errorTurns 能透传到段头 hasError，且不改入参', () => {
+  const rows = [
+    { index: 0, turn: 1, label: 'a', active: false, timeText: '', hit: false, hasError: true },
+    { index: 1, turn: 2, label: 'b', active: false, timeText: '', hit: false },
+  ]
+  const segments = [{ id: 's1', title: '错误段', startTurn: 1, endTurn: 2 }]
+  const rowsSnap = JSON.stringify(rows)
+  const segsSnap = JSON.stringify(segments)
+
+  const groups = segmentGroupsOf(rows, segments)
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].hasError, true)
+  assert.equal(JSON.stringify(rows), rowsSnap)
+  assert.equal(JSON.stringify(segments), segsSnap)
 })
 
 // ── 汇总 ────────────────────────────────────────────────────────────

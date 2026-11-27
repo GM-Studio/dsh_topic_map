@@ -29,10 +29,10 @@ const itemOf = (model, groupId, key) => groupOf(model, groupId).items.find(item 
 console.log('\nsettings-view')
 
 // ── 结构 ────────────────────────────────────────────────────────────
-test('settingsModel：四组顺序与标题', () => {
+test('settingsModel：五组顺序与标题（含续接与事）', () => {
   const model = settingsModel({})
-  assert.deepEqual(model.groups.map(group => group.id), ['model', 'index', 'quote', 'ui'])
-  assert.deepEqual(model.groups.map(group => group.title), ['模型', '索引', '引用', '界面'])
+  assert.deepEqual(model.groups.map(group => group.id), ['work', 'model', 'index', 'quote', 'ui'])
+  assert.deepEqual(model.groups.map(group => group.title), ['续接与事', '模型', '索引', '引用', '界面'])
   for (const group of model.groups) {
     assert.ok(Array.isArray(group.items) && group.items.length > 0, `${group.id} 应有设置项`)
     for (const item of group.items) {
@@ -139,6 +139,39 @@ test('settingsModel：非法引用配置回默认或夹到边界', () => {
   assert.equal(itemOf(model, 'quote', 'quoteMaxChars').value, 8000)
 })
 
+// ── 续接与事组 ──────────────────────────────────────────────────────
+test('settingsModel：续接与事组含 dormantDays 与 inflectionNotice 默认值与选项', () => {
+  const model = settingsModel({})
+  const dormant = itemOf(model, 'work', 'dormantDays')
+  assert.equal(dormant.type, 'select')
+  assert.equal(dormant.value, 14)
+  assert.equal(dormant.default, 14)
+  assert.equal(dormant.min, 0)
+  assert.equal(dormant.max, 365)
+  assert.deepEqual(dormant.options.map(option => option.value), [7, 14, 30, 0])
+  for (const option of dormant.options) assert.ok(option.label.length > 0)
+
+  const notice = itemOf(model, 'work', 'inflectionNotice')
+  assert.equal(notice.type, 'boolean')
+  assert.equal(notice.value, true)
+  assert.equal(notice.default, true)
+})
+
+test('settingsModel：dormantDays 合法整数回显与越界/非法值归一', () => {
+  assert.equal(itemOf(settingsModel({ dormantDays: 0 }), 'work', 'dormantDays').value, 0)
+  assert.equal(itemOf(settingsModel({ dormantDays: 7 }), 'work', 'dormantDays').value, 7)
+  assert.equal(itemOf(settingsModel({ dormantDays: 30 }), 'work', 'dormantDays').value, 30)
+  assert.equal(itemOf(settingsModel({ dormantDays: 45 }), 'work', 'dormantDays').value, 45)
+  assert.equal(itemOf(settingsModel({ dormantDays: '21' }), 'work', 'dormantDays').value, 21)
+  assert.equal(itemOf(settingsModel({ dormantDays: -5 }), 'work', 'dormantDays').value, 0)
+  assert.equal(itemOf(settingsModel({ dormantDays: 999 }), 'work', 'dormantDays').value, 365)
+  assert.equal(itemOf(settingsModel({ dormantDays: 'abc' }), 'work', 'dormantDays').value, 14)
+
+  assert.equal(itemOf(settingsModel({ inflectionNotice: false }), 'work', 'inflectionNotice').value, false)
+  assert.equal(itemOf(settingsModel({ inflectionNotice: '0' }), 'work', 'inflectionNotice').value, false)
+  assert.equal(itemOf(settingsModel({ inflectionNotice: 'invalid' }), 'work', 'inflectionNotice').value, true)
+})
+
 // ── 界面组 ──────────────────────────────────────────────────────────
 test('settingsModel：railNative 布尔项', () => {
   const off = itemOf(settingsModel({}), 'ui', 'railNative')
@@ -216,6 +249,33 @@ test('applySetting：railNative 布尔转换', () => {
   const bad = applySetting({ railNative: false }, 'railNative', 'maybe')
   assert.ok(bad.error.includes('true'))
   assert.deepEqual(bad.config, { railNative: false })
+})
+
+test('applySetting：dormantDays 接受 0–365 整数并拒绝越界或非数字', () => {
+  assert.equal(applySetting({}, 'dormantDays', 0).config.dormantDays, 0)
+  assert.equal(applySetting({}, 'dormantDays', 7).config.dormantDays, 7)
+  assert.equal(applySetting({}, 'dormantDays', 14).config.dormantDays, 14)
+  assert.equal(applySetting({}, 'dormantDays', 30).config.dormantDays, 30)
+  assert.equal(applySetting({}, 'dormantDays', 365).config.dormantDays, 365)
+  assert.equal(applySetting({}, 'dormantDays', '45').config.dormantDays, 45)
+  assert.equal(applySetting({}, 'dormantDays', 14.9).config.dormantDays, 14)
+
+  const neg = applySetting({ dormantDays: 14 }, 'dormantDays', -1)
+  assert.ok(neg.error.includes('0–365'))
+  assert.deepEqual(neg.config, { dormantDays: 14 })
+  assert.ok(applySetting({}, 'dormantDays', 366).error.includes('0–365'))
+  assert.ok(applySetting({}, 'dormantDays', 'abc').error.includes('数字'))
+  assert.ok(applySetting({}, 'dormantDays', true).error.includes('数字'))
+})
+
+test('applySetting：inflectionNotice 布尔转换与非法报错', () => {
+  assert.equal(applySetting({}, 'inflectionNotice', true).config.inflectionNotice, true)
+  assert.equal(applySetting({}, 'inflectionNotice', false).config.inflectionNotice, false)
+  assert.equal(applySetting({}, 'inflectionNotice', 'on').config.inflectionNotice, true)
+  assert.equal(applySetting({}, 'inflectionNotice', '0').config.inflectionNotice, false)
+  const bad = applySetting({ inflectionNotice: true }, 'inflectionNotice', 'maybe')
+  assert.ok(bad.error.includes('true'))
+  assert.deepEqual(bad.config, { inflectionNotice: true })
 })
 
 test('applySetting：未知键只报错不动配置', () => {

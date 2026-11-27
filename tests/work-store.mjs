@@ -1293,6 +1293,61 @@ await test('confirmAllPendingWorks 与 POST /work-review-all：一键批量确�
   })
 })
 
+await test('POST /works：响应带 refineStatus（契约四字段），且不破坏既有的 refining / semanticUsed 字段', async () => {
+  await withTempHome(async () => {
+    const recentTime = Date.now() - 60_000
+    const events = {
+      [SESS_A]: makeEvents([
+        {
+          prompt: '实现 lib/refine-status.js 的提炼状态上报',
+          response: '完成状态上报',
+          toolCalls: [{ name: 'edit', arguments: { file_path: 'lib/refine-status.js' } }],
+        },
+      ], recentTime),
+    }
+    const llm = makeFakeLlm(call => {
+      const m = call.messages[0].content[0].text.match(/\[(cl-\d+)\]/)
+      const cid = m ? m[1] : 'cl-1'
+      return JSON.stringify({
+        works: [{
+          clusterIds: [cid],
+          title: '提炼状态契约测试标题',
+          goal: '目标',
+          state: 'active',
+          statusSummary: '现状',
+          nextStep: '下一步',
+          decisions: [],
+        }],
+        chatClusterIds: [],
+      })
+    })
+    const ctx = makeCtx({ events, llm })
+    apply(ctx)
+    const handler = ctx._routes[0].handler
+
+    const res = await callRoute(handler, 'POST', 'works', { workspaceId: WS })
+    assert.equal(res.status, 200)
+    assert.equal(res.body.ok, true)
+    // 既有字段必须还在（不能因为新增 refineStatus 而丢掉别的字段）
+    for (const key of ['workspaceId', 'initialized', 'refining', 'cards', 'works', 'pendingReviewCount']) {
+      assert.ok(key in res.body.value, `既有字段 ${key} 不得丢失`)
+    }
+    const status = res.body.value.refineStatus
+    assert.ok(status !== null && typeof status === 'object', 'refineStatus 必须存在')
+    assert.deepEqual(
+      Object.keys(status).sort(),
+      ['at', 'attempts', 'reason', 'used'],
+      'refineStatus 必须是契约的四个字段',
+    )
+    assert.equal(typeof status.used, 'boolean')
+    assert.equal(typeof status.attempts, 'number')
+    assert.equal(typeof status.reason, 'string')
+    assert.ok(status.at === null || typeof status.at === 'number')
+    // 该工作区从未提炼过（首帧只做了 L0 快扫）时，reason 是空串而不是 undefined
+    assert.notEqual(status.reason, undefined)
+  })
+})
+
 console.log(`\n${passed} passed, ${failures.length} failures`)
 if (failures.length > 0) {
   for (const failure of failures) console.error(`\n${failure.name}\n${failure.error.stack}`)

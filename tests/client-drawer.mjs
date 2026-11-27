@@ -28,6 +28,9 @@ const SOURCE = [
   src.slice(src.indexOf('    var DRAWER = (function () {'), src.indexOf('\n    })()', src.indexOf('    var DRAWER = (function () {')) + '\n    })()'.length),
   extractFunction(src, 'drawerColumn'),
   extractFunction(src, 'workspaceDisplayName'),
+  extractFunction(src, 'shouldFollowOwnWorkspace'),
+  extractFunction(src, 'shouldFollowSessionSwitch'),
+  extractFunction(src, 'workPickSuffix'),
   extractFunction(src, 'requestTopicMap'),
   extractFunction(src, 'TopicMapDrawerSurface'),
   extractFunction(src, 'TopicMapDrawer'),
@@ -104,8 +107,9 @@ async function mount(options) {
     setItem(key, value) { memory.set(key, String(value)) },
   }
   const previousFetch = globalThis.fetch
+  const wsPayload = Array.isArray(settings.workspaces) ? settings.workspaces : []
   globalThis.fetch = function () {
-    return Promise.resolve({ status: 200, json: () => Promise.resolve({ ok: true, value: [] }) })
+    return Promise.resolve({ status: 200, json: () => Promise.resolve({ ok: true, value: wsPayload }) })
   }
   const intervals = []
   globalThis.setInterval = function (fn) { intervals.push(fn); return intervals.length }
@@ -129,7 +133,7 @@ async function mount(options) {
       { setDockObscured(value) { railCalls.push(value) } },
       function () {},
     ],
-    { sessionId: 's1' },
+    { sessionId: settings.sessionId === undefined ? 's1' : settings.sessionId },
   )
   function cleanup() {
     runtime.unmount()
@@ -259,4 +263,50 @@ await test('布局：分类胶囊横向滚动，<420 单列与设置纵排', asy
   assert.equal(src.includes('dsh_tm_histcatpop'), false, '旧分类浮层已删除')
 })
 
+await test('工作区下拉：未统计的对话数不得显示成「0 对话」', async () => {
+  const m = await mount({
+    workspaces: [
+      { id: 'ws-own', title: '本区', sessionCount: 3, conversationCount: 5, emptySessionCount: 0 },
+      { id: 'ws-known', title: '有数字', sessionCount: 2, conversationCount: 7, emptySessionCount: 0 },
+      { id: 'ws-null', title: '没统计过', sessionCount: 4, conversationCount: null, emptySessionCount: null },
+    ],
+  })
+  await m.runtime.settle()
+  const options = findAll(m.runtime.tree, n => n && n.type === 'option')
+  const texts = options.map(o => textOf(o))
+  const nullOne = texts.find(t => t.indexOf('没统计过') >= 0)
+  assert.ok(nullOne !== undefined, '应有「没统计过」这个选项，实际 ' + JSON.stringify(texts))
+  assert.ok(nullOne.indexOf('0 对话') === -1, '未知不能显示成 0 对话：' + nullOne)
+  const knownOne = texts.find(t => t.indexOf('有数字') >= 0)
+  assert.ok(knownOne !== undefined && knownOne.indexOf('7 对话') >= 0, '已统计的要显示真实数字：' + knownOne)
+  m.cleanup()
+})
+
+await test('联动规则：主对话换工作区要跟回去，同区轮询不得冲掉手动选择', async () => {
+  // 纯函数直接提取求值：不依赖组件挂载，测的就是这条规则本身。
+  const followSrc = extractFunction(src, 'shouldFollowOwnWorkspace')
+  const follow = new Function(followSrc + '\nreturn shouldFollowOwnWorkspace')()
+  assert.equal(follow('ws-a', 'ws-b'), true, '归属变了 → 跟回去')
+  assert.equal(follow('ws-a', 'ws-a'), false, '归属没变 → 不动用户的选择')
+  assert.equal(follow('', 'ws-b'), false, '首次确定归属不算「变更」')
+  assert.equal(follow('ws-a', ''), false, '归属未知时不瞎动')
+})
+
+await test('下拉后缀：有对话/只有空会话/未统计 三种情况说三句不同的话', async () => {
+  const suffixSrc = extractFunction(src, 'workPickSuffix')
+  const suffix = new Function(suffixSrc + '\nreturn workPickSuffix')()
+  assert.equal(suffix({ conversationCount: 7, emptySessionCount: 0 }), '（7 对话）')
+  assert.equal(suffix({ conversationCount: 0, emptySessionCount: 3 }), '（只有 3 个空会话）', '空会话要说明白，不能只说 0 对话')
+  assert.equal(suffix({ conversationCount: 0, emptySessionCount: 0 }), '（无对话）')
+  assert.equal(suffix({ conversationCount: null, emptySessionCount: null }), '', '未统计不得显示 0')
+})
+
+await test('联动规则：主对话换会话要跟回本区，同一会话轮询不得冲掉选择', async () => {
+  const switchSrc = extractFunction(src, 'shouldFollowSessionSwitch')
+  const follow = new Function(switchSrc + '\nreturn shouldFollowSessionSwitch')()
+  assert.equal(follow('sess-1', 'sess-2'), true, '换会话 → 跟回本区')
+  assert.equal(follow('sess-1', 'sess-1'), false, '同一会话轮询 → 不动用户的选择')
+  assert.equal(follow(null, 'sess-1'), false, '首次确定会话不算切换')
+  assert.equal(follow('sess-1', ''), false, '读不到会话时不瞎动')
+})
 finish()
